@@ -198,11 +198,11 @@ jobs:
             --without-http_ssi_module \
             --with-openssl="../openssl-${OPENSSL_VER}" \
             --with-openssl-opt="no-shared no-async" \
-            --add-module="../headers-more-nginx-module-master" \
+            --add-module="../headers-more-nginx-module" \
             --add-module="../nginx-http-flv-module" \
             --add-module="../nginx_cookie_flag_module" \
             --with-cc-opt="-O2" \
-            --with-ld-opt="-static -lpthread -ldl -lssl -lcrypto -lstdc++ -lm"
+            --with-ld-opt="-static -lpthread -ldl -lstdc++ -lm"
 
           make -j$(nproc)
 
