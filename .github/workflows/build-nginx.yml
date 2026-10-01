@@ -1,124 +1,178 @@
-name: Build Nginx with OpenSSL 4.0
+name: Build Nginx with OpenSSL & Brotli
 
 on:
   push:
-    branches: [ "main" ]
-  workflow_dispatch: # 允许手动触发
-
-env:
-  OPENSSL_VERSION: 4.0.3
-  NGINX_VERSION: 1.31.6
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+    inputs:
+      openssl_major:
+        description: 'OpenSSL Major Version'
+        required: true
+        default: '4.0'
+        type: string
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
+    env:
+      OPENSSL_MAJOR: ${{ inputs.openssl_major || '4.0' }}
 
-      # -----------------------------------------------------------------
-      # 1. 缓存预编译好的 OpenSSL include 和 lib 目录
-      # 只要 OPENSSL_VERSION 不变，后续构建会直接命中缓存，跳过 OpenSSL 编译
-      # -----------------------------------------------------------------
-      - name: OpenSSL 编译结果缓存
+    steps:
+      - name: 检出代码及所有子模块
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: 缓存 OpenSSL 源码目录
         id: cache-openssl
         uses: actions/cache@v4
         with:
-          path: ~/openssl-build
-          key: openssl-${{ env.OPENSSL_VERSION }}-alpine
+          path: modules/openssl-*
+          key: openssl-source-${{ env.OPENSSL_MAJOR }}-${{ github.run_id }}
+          restore-keys: |
+            openssl-source-${{ env.OPENSSL_MAJOR }}-
 
-      # -----------------------------------------------------------------
-      # 2. 如果未命中缓存，在 Alpine 容器中编译 OpenSSL 4.0
-      # -----------------------------------------------------------------
-      - name: 编译 OpenSSL (未命中缓存时执行)
-        if: steps.cache-openssl.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p ~/openssl-build
-          docker run --rm \
-            -v ~/openssl-build:/opt/openssl \
-            alpine:latest sh -c "
-              apk add --no-cache build-base wget perl linux-headers && \
-              wget https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz && \
-              tar -zxvf openssl-${OPENSSL_VERSION}.tar.gz && \
-              cd openssl-${OPENSSL_VERSION} && \
-              ./config no-shared --prefix=/opt/openssl --openssldir=/opt/openssl && \
-              make -j\$(nproc) && \
-              make install_sw
-            "
+      - name: 缓存 Brotli 编译产物
+        id: cache-brotli
+        uses: actions/cache@v4
+        with:
+          path: modules/ngx_brotli/deps/brotli/out
+          key: brotli-build-${{ hashFiles('modules/ngx_brotli/deps/brotli/**') }}
 
-      # -----------------------------------------------------------------
-      # 3. 编译 Nginx（直接加载缓存中的 OpenSSL 头文件与静态库）
-      # -----------------------------------------------------------------
-      - name: 编译 Nginx (静态链接预编译好的 OpenSSL)
+      - name: 在 Alpine 容器中执行全量编译
         run: |
-          mkdir -p ./out
           docker run --rm \
-            -v ~/openssl-build:/opt/openssl \
-            -v $(pwd)/out:/out \
-            alpine:latest sh -c "
-              apk add --no-cache build-base wget pcre-dev zlib-dev linux-headers && \
-              wget https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz && \
-              tar -zxvf nginx-${NGINX_VERSION}.tar.gz && \
-              cd nginx-${NGINX_VERSION} && \
-              ./configure \
+            -v $(pwd):/workspace \
+            -w /workspace \
+            alpine:latest \
+            sh -c "
+              set -e
+              
+              echo '========================================'
+              echo '1. 安装编译依赖...'
+              echo '========================================'
+              apk add --no-cache \
+                build-base \
+                bash \
+                curl \
+                git \
+                jq \
+                cmake \
+                pcre-dev \
+                zlib-dev \
+                perl \
+                linux-headers
+
+              ROOT='/workspace'
+              cd \"\$ROOT\"
+
+              echo '========================================'
+              echo '2. 检查与下载 OpenSSL ${OPENSSL_MAJOR}...'
+              echo '========================================'
+              mkdir -p \"\$ROOT/modules\"
+
+              OPENSSL_VERSION=\"\$(
+                curl -fsSL \
+                  -H 'Accept: application/vnd.github+json' \
+                  'https://api.github.com/repos/openssl/openssl/releases?per_page=100' \
+                  | jq -r '
+                    .[]
+                    | select(.draft == false and .prerelease == false)
+                    | .tag_name
+                  ' \
+                  | sed 's/^openssl-//' \
+                  | grep \"^\${OPENSSL_MAJOR}\\.[0-9]*\$\" \
+                  | sort -V \
+                  | tail -n 1
+              )\"
+
+              if [ -z \"\$OPENSSL_VERSION\" ]; then
+                echo 'ERROR: Cannot find a stable OpenSSL release.'
+                exit 1
+              fi
+              echo 'Selected OpenSSL: ' \$OPENSSL_VERSION
+
+              OPENSSL_DIR=\"\$ROOT/modules/openssl-\$OPENSSL_VERSION\"
+              OPENSSL_LINK=\"\$ROOT/modules/openssl-current\"
+
+              if [ ! -d \"\$OPENSSL_DIR\" ]; then
+                curl -fL \
+                  \"https://github.com/openssl/openssl/releases/download/openssl-\$OPENSSL_VERSION/openssl-\$OPENSSL_VERSION.tar.gz\" \
+                  -o \"\$ROOT/modules/openssl-\$OPENSSL_VERSION.tar.gz\"
+                tar -xzf \"\$ROOT/modules/openssl-\$OPENSSL_VERSION.tar.gz\" -C \"\$ROOT/modules\"
+                rm -f \"\$ROOT/modules/openssl-\$OPENSSL_VERSION.tar.gz\"
+              fi
+
+              ln -sfn \"openssl-\$OPENSSL_VERSION\" \"\$OPENSSL_LINK\"
+
+              echo '========================================'
+              echo '3. 编译 Brotli...'
+              echo '========================================'
+              cd \"\$ROOT/modules/ngx_brotli/deps/brotli\"
+              rm -rf out && mkdir -p out && cd out
+              cmake \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DBUILD_SHARED_LIBS=OFF \
+                -DBUILD_TESTING=OFF \
+                -DCMAKE_C_FLAGS='-Ofast -m64 -march=native -mtune=native -flto -funroll-loops -ffunction-sections -fdata-sections' \
+                -DCMAKE_CXX_FLAGS='-Ofast -m64 -march=native -mtune=native -flto -funroll-loops -ffunction-sections -fdata-sections' \
+                -DCMAKE_INSTALL_PREFIX=./installed \
+                ..
+              cmake --build . --config Release --target brotlienc
+
+              echo '========================================'
+              echo '4. 配置与编译 NGINX...'
+              echo '========================================'
+              cd \"\$ROOT\"
+              ./auto/configure \
                 --prefix=/usr/local/nginx \
-                \
                 --error-log-path=/var/log/nginx/error.log \
                 --http-log-path=/var/log/nginx/access.log \
                 --pid-path=/var/run/nginx.pid \
                 --lock-path=/var/run/nginx.lock \
-                \
                 --with-compat \
                 --with-threads \
-                \
                 --with-http_stub_status_module \
                 --with-http_ssl_module \
                 --with-http_realip_module \
                 --with-http_v2_module \
                 --with-http_v3_module \
-                \
                 --with-stream \
                 --with-stream_realip_module \
                 --with-stream_ssl_module \
                 --with-stream_ssl_preread_module \
-                \
                 --with-http_gzip_static_module \
                 --with-http_gunzip_module \
                 --with-http_mp4_module \
                 --with-http_sub_module \
-                \
                 --with-pcre-jit \
                 --with-debug \
-                \
                 --without-select_module \
                 --without-poll_module \
-                \
                 --without-http_userid_module \
                 --without-http_mirror_module \
                 --without-http_autoindex_module \
-                \
                 --without-http_fastcgi_module \
                 --without-http_uwsgi_module \
                 --without-http_scgi_module \
                 --without-http_memcached_module \
-                \
                 --without-http_ssi_module \
-                \
                 --without-mail_pop3_module \
                 --without-mail_imap_module \
                 --without-mail_smtp_module \
-                --with-cc-opt='-I/opt/openssl/include' \
-                --with-ld-opt='-L/opt/openssl/lib -Wl,-rpath,/opt/openssl/lib' && \
-              make -j\$(nproc) && \
-              cp objs/nginx /out/nginx
+                --add-module=\"\$ROOT/modules/headers-more-nginx-module\" \
+                --add-module=\"\$ROOT/modules/nginx_cookie_flag_module\" \
+                --add-module=\"\$ROOT/modules/ngx_brotli\" \
+                --with-openssl=\"\$OPENSSL_LINK\" \
+                --with-cc-opt='-I'\"\$ROOT\"'/modules/ngx_brotli/deps/brotli/c/include' \
+                --with-ld-opt='-static -lbrotlienc -lbrotlicommon -lstdc++ -lpthread -lm'
+
+              make -j\$(nproc)
             "
 
-      # -----------------------------------------------------------------
-      # 4. 上传编译产物（只有几兆大小的纯静态/半静态二进制文件）
-      # -----------------------------------------------------------------
-      - name: 上传打包好的 Nginx 二进制文件
+      - name: 上传 Nginx 二进制编译产物
         uses: actions/upload-artifact@v4
         with:
-          name: nginx-openssl4
-          path: ./out/nginx
+          name: nginx-binary
+          path: objs/nginx
