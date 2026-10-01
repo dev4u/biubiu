@@ -2,6 +2,8 @@
 name: Build Static Nginx
 
 on:
+  schedule:
+    - cron: '0 17 * * *'   # UTC 17:00 = 北京时间每天 01:00
   workflow_dispatch:
     inputs:
       openssl_major:
@@ -19,7 +21,7 @@ jobs:
     permissions:
       contents: write   # 发布 Release 需要
     container:
-      image: alpine:3.21   # musl libc，天然适合全静态编译
+      image: alpine:latest   # musl libc，天然适合全静态编译
 
     steps:
       # ── 1. 安装编译依赖 ──────────────────────────────────────────
