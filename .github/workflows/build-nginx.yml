@@ -137,6 +137,19 @@ jobs:
           tar xzf "openssl-${OPENSSL_VER}.tar.gz"
           tar xzf "nginx-${NGINX_VER}.tar.gz"
 
+          wget -q https://github.com/openresty/headers-more-nginx-module/archive/refs/heads/master.tar.gz \
+            -O headers-more-nginx-module.tar.gz
+          tar xzf headers-more-nginx-module.tar.gz
+          
+          wget -q https://github.com/winshining/nginx-http-flv-module/archive/refs/heads/master.tar.gz \
+            -O nginx-http-flv-module.tar.gz
+          tar xzf nginx-http-flv-module.tar.gz
+
+          wget -q https://github.com/AirisX/nginx_cookie_flag_module/archive/refs/heads/master.tar.gz \
+            -O nginx_cookie_flag_module.tar.gz
+          tar xzf nginx_cookie_flag_module.tar.gz
+
+
       # ── 5. 静态编译 ───────────────────────────────────────────────
       - name: Configure and build static Nginx
         shell: bash
@@ -185,6 +198,9 @@ jobs:
             --without-http_ssi_module \
             --with-openssl="../openssl-${OPENSSL_VER}" \
             --with-openssl-opt="no-shared no-async" \
+            --add-module="../headers-more-nginx-module-master" \
+            --add-module="../nginx-http-flv-module" \
+            --add-module="../nginx_cookie_flag_module" \
             --with-cc-opt="-O2" \
             --with-ld-opt="-static -lpthread -ldl -lssl -lcrypto -lstdc++ -lm"
 
