@@ -1,178 +1,184 @@
-name: Build Nginx with OpenSSL & Brotli
+# .github/workflows/build-nginx-static.yml
+name: Build Static Nginx
 
 on:
-  push:
-    branches: [ "main", "master" ]
   workflow_dispatch:
     inputs:
       openssl_major:
-        description: 'OpenSSL Major Version'
+        description: 'OpenSSL 版本前缀 (如: 3.4 / 3.3 / 3.2 / 1.1.1)'
         required: true
         default: '4.0'
-        type: string
+      nginx_major:
+        description: 'Nginx 版本前缀 (如: 1.28 / 1.26 / 1.25)'
+        required: true
+        default: '1.31'
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
-    env:
-      OPENSSL_MAJOR: ${{ inputs.openssl_major || '4.0' }}
+    container:
+      image: alpine:3.21   # musl libc，天然适合全静态编译
 
     steps:
-      - name: 检出代码及所有子模块
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: 缓存 OpenSSL 源码目录
-        id: cache-openssl
-        uses: actions/cache@v4
-        with:
-          path: modules/openssl-*
-          key: openssl-source-${{ env.OPENSSL_MAJOR }}-${{ github.run_id }}
-          restore-keys: |
-            openssl-source-${{ env.OPENSSL_MAJOR }}-
-
-      - name: 缓存 Brotli 编译产物
-        id: cache-brotli
-        uses: actions/cache@v4
-        with:
-          path: modules/ngx_brotli/deps/brotli/out
-          key: brotli-build-${{ hashFiles('modules/ngx_brotli/deps/brotli/**') }}
-
-      - name: 在 Alpine 容器中执行全量编译
+      # ── 1. 安装编译依赖 ──────────────────────────────────────────
+      - name: Install build dependencies
         run: |
-          docker run --rm \
-            -v $(pwd):/workspace \
-            -w /workspace \
-            alpine:latest \
-            sh -c "
-              set -e
-              
-              echo '========================================'
-              echo '1. 安装编译依赖...'
-              echo '========================================'
-              apk add --no-cache \
-                build-base \
-                bash \
-                curl \
-                git \
-                jq \
-                cmake \
-                pcre-dev \
-                zlib-dev \
-                perl \
-                linux-headers
+          apk add --no-cache \
+            bash curl wget \
+            build-base perl linux-headers \
+            pcre2-dev pcre2-static \
+            zlib-dev zlib-static
 
-              ROOT='/workspace'
-              cd \"\$ROOT\"
+      # ── 2. 解析 OpenSSL 最新小版本号 ─────────────────────────────
+      - name: Resolve latest OpenSSL version
+        id: openssl
+        shell: bash
+        run: |
+          set -euo pipefail
+          PREFIX="${{ inputs.openssl_major }}"
+          ESCAPED="${PREFIX//./\\.}"
 
-              echo '========================================'
-              echo '2. 检查与下载 OpenSSL ${OPENSSL_MAJOR}...'
-              echo '========================================'
-              mkdir -p \"\$ROOT/modules\"
+          echo "🔍 Searching OpenSSL ${PREFIX}.x ..."
 
-              OPENSSL_VERSION=\"\$(
-                curl -fsSL \
-                  -H 'Accept: application/vnd.github+json' \
-                  'https://api.github.com/repos/openssl/openssl/releases?per_page=100' \
-                  | jq -r '
-                    .[]
-                    | select(.draft == false and .prerelease == false)
-                    | .tag_name
-                  ' \
-                  | sed 's/^openssl-//' \
-                  | grep \"^\${OPENSSL_MAJOR}\\.[0-9]*\$\" \
-                  | sort -V \
-                  | tail -n 1
-              )\"
+          # 优先：官方 source 页（当前维护版本）
+          LATEST=$(curl -sf "https://www.openssl.org/source/" \
+            | grep -oE "openssl-${ESCAPED}(\.[0-9]+|[a-z])\.tar\.gz" \
+            | sed 's/\.tar\.gz//' | sort -V | tail -1 || true)
 
-              if [ -z \"\$OPENSSL_VERSION\" ]; then
-                echo 'ERROR: Cannot find a stable OpenSSL release.'
-                exit 1
-              fi
-              echo 'Selected OpenSSL: ' \$OPENSSL_VERSION
+          # 其次：旧版归档页
+          if [[ -z "$LATEST" ]]; then
+            LATEST=$(curl -sf "https://www.openssl.org/source/old/${PREFIX}/" \
+              | grep -oE "openssl-${ESCAPED}(\.[0-9]+|[a-z])\.tar\.gz" \
+              | sed 's/\.tar\.gz//' | sort -V | tail -1 || true)
+          fi
 
-              OPENSSL_DIR=\"\$ROOT/modules/openssl-\$OPENSSL_VERSION\"
-              OPENSSL_LINK=\"\$ROOT/modules/openssl-current\"
+          # 兜底：GitHub Tags API（处理未归档的新版）
+          if [[ -z "$LATEST" ]]; then
+            for PAGE in 1 2 3 4 5; do
+              RAW=$(curl -sf \
+                "https://api.github.com/repos/openssl/openssl/tags?per_page=100&page=${PAGE}") || break
+              [[ -z "$RAW" || "$RAW" == "[]" ]] && break
 
-              if [ ! -d \"\$OPENSSL_DIR\" ]; then
-                curl -fL \
-                  \"https://github.com/openssl/openssl/releases/download/openssl-\$OPENSSL_VERSION/openssl-\$OPENSSL_VERSION.tar.gz\" \
-                  -o \"\$ROOT/modules/openssl-\$OPENSSL_VERSION.tar.gz\"
-                tar -xzf \"\$ROOT/modules/openssl-\$OPENSSL_VERSION.tar.gz\" -C \"\$ROOT/modules\"
-                rm -f \"\$ROOT/modules/openssl-\$OPENSSL_VERSION.tar.gz\"
-              fi
+              MATCH=$(echo "$RAW" \
+                | grep -oE '"openssl-[^"]+"' | tr -d '"' \
+                | grep -E "^openssl-${ESCAPED}(\.[0-9]+|[a-z])$" \
+                | sort -V | tail -1 || true)
+              [[ -n "$MATCH" ]] && LATEST="$MATCH" && break
 
-              ln -sfn \"openssl-\$OPENSSL_VERSION\" \"\$OPENSSL_LINK\"
+              COUNT=$(echo "$RAW" | grep -c '"name"' || echo 0)
+              [[ $COUNT -lt 100 ]] && break
+            done
+          fi
 
-              echo '========================================'
-              echo '3. 编译 Brotli...'
-              echo '========================================'
-              cd \"\$ROOT/modules/ngx_brotli/deps/brotli\"
-              rm -rf out && mkdir -p out && cd out
-              cmake \
-                -DCMAKE_BUILD_TYPE=Release \
-                -DBUILD_SHARED_LIBS=OFF \
-                -DBUILD_TESTING=OFF \
-                -DCMAKE_C_FLAGS='-Ofast -m64 -march=native -mtune=native -flto -funroll-loops -ffunction-sections -fdata-sections' \
-                -DCMAKE_CXX_FLAGS='-Ofast -m64 -march=native -mtune=native -flto -funroll-loops -ffunction-sections -fdata-sections' \
-                -DCMAKE_INSTALL_PREFIX=./installed \
-                ..
-              cmake --build . --config Release --target brotlienc
+          [[ -z "$LATEST" ]] && { echo "❌ No OpenSSL found for prefix: ${PREFIX}"; exit 1; }
 
-              echo '========================================'
-              echo '4. 配置与编译 NGINX...'
-              echo '========================================'
-              cd \"\$ROOT\"
-              ./auto/configure \
-                --prefix=/usr/local/nginx \
-                --error-log-path=/var/log/nginx/error.log \
-                --http-log-path=/var/log/nginx/access.log \
-                --pid-path=/var/run/nginx.pid \
-                --lock-path=/var/run/nginx.lock \
-                --with-compat \
-                --with-threads \
-                --with-http_stub_status_module \
-                --with-http_ssl_module \
-                --with-http_realip_module \
-                --with-http_v2_module \
-                --with-http_v3_module \
-                --with-stream \
-                --with-stream_realip_module \
-                --with-stream_ssl_module \
-                --with-stream_ssl_preread_module \
-                --with-http_gzip_static_module \
-                --with-http_gunzip_module \
-                --with-http_mp4_module \
-                --with-http_sub_module \
-                --with-pcre-jit \
-                --with-debug \
-                --without-select_module \
-                --without-poll_module \
-                --without-http_userid_module \
-                --without-http_mirror_module \
-                --without-http_autoindex_module \
-                --without-http_fastcgi_module \
-                --without-http_uwsgi_module \
-                --without-http_scgi_module \
-                --without-http_memcached_module \
-                --without-http_ssi_module \
-                --without-mail_pop3_module \
-                --without-mail_imap_module \
-                --without-mail_smtp_module \
-                --add-module=\"\$ROOT/modules/headers-more-nginx-module\" \
-                --add-module=\"\$ROOT/modules/nginx_cookie_flag_module\" \
-                --add-module=\"\$ROOT/modules/ngx_brotli\" \
-                --with-openssl=\"\$OPENSSL_LINK\" \
-                --with-cc-opt='-I'\"\$ROOT\"'/modules/ngx_brotli/deps/brotli/c/include' \
-                --with-ld-opt='-static -lbrotlienc -lbrotlicommon -lstdc++ -lpthread -lm'
+          VER="${LATEST#openssl-}"
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "✅ OpenSSL: ${VER}"
 
-              make -j\$(nproc)
-            "
+      # ── 3. 解析 Nginx 最新小版本号 ───────────────────────────────
+      - name: Resolve latest Nginx version
+        id: nginx
+        shell: bash
+        run: |
+          set -euo pipefail
+          PREFIX="${{ inputs.nginx_major }}"
+          ESCAPED="${PREFIX//./\\.}"
 
-      - name: 上传 Nginx 二进制编译产物
+          echo "🔍 Searching Nginx ${PREFIX}.x ..."
+
+          LATEST=$(curl -sf "https://nginx.org/en/download.html" \
+            | grep -oE "nginx-${ESCAPED}\.[0-9]+" \
+            | sort -V | tail -1 || true)
+
+          [[ -z "$LATEST" ]] && { echo "❌ No Nginx found for prefix: ${PREFIX}"; exit 1; }
+
+          VER="${LATEST#nginx-}"
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "✅ Nginx: ${VER}"
+
+      # ── 4. 下载源码 ───────────────────────────────────────────────
+      - name: Download sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          OPENSSL_VER="${{ steps.openssl.outputs.version }}"
+          NGINX_VER="${{ steps.nginx.outputs.version }}"
+          MINOR_PREFIX="${OPENSSL_VER%.*}"
+
+          # 优先 current source，回退到 old archive
+          PRIMARY="https://www.openssl.org/source/openssl-${OPENSSL_VER}.tar.gz"
+          FALLBACK="https://www.openssl.org/source/old/${MINOR_PREFIX}/openssl-${OPENSSL_VER}.tar.gz"
+
+          if wget -q --spider "${PRIMARY}" 2>/dev/null; then
+            echo "📦 OpenSSL (current): ${PRIMARY}"
+            wget -q "${PRIMARY}"
+          else
+            echo "📦 OpenSSL (archive): ${FALLBACK}"
+            wget -q "${FALLBACK}"
+          fi
+
+          echo "📦 Nginx: https://nginx.org/download/nginx-${NGINX_VER}.tar.gz"
+          wget -q "https://nginx.org/download/nginx-${NGINX_VER}.tar.gz"
+
+          tar xzf "openssl-${OPENSSL_VER}.tar.gz"
+          tar xzf "nginx-${NGINX_VER}.tar.gz"
+
+      # ── 5. 静态编译 ───────────────────────────────────────────────
+      - name: Configure and build static Nginx
+        shell: bash
+        run: |
+          set -euo pipefail
+          OPENSSL_VER="${{ steps.openssl.outputs.version }}"
+          NGINX_VER="${{ steps.nginx.outputs.version }}"
+
+          cd "nginx-${NGINX_VER}"
+
+          ./configure \
+            --prefix=/etc/nginx \
+            --sbin-path=/usr/sbin/nginx \
+            --modules-path=/etc/nginx/modules \
+            --conf-path=/etc/nginx/nginx.conf \
+            --error-log-path=/var/log/nginx/error.log \
+            --http-log-path=/var/log/nginx/access.log \
+            --pid-path=/var/run/nginx.pid \
+            --with-openssl="../openssl-${OPENSSL_VER}" \
+            --with-openssl-opt="no-shared no-async" \
+            --with-http_ssl_module \
+            --with-http_v2_module \
+            --with-http_stub_status_module \
+            --with-http_gzip_static_module \
+            --with-stream \
+            --with-stream_ssl_module \
+            --with-cc-opt="-O2" \
+            --with-ld-opt="-static -lpthread -ldl"
+
+          make -j$(nproc)
+
+          echo ""
+          echo "=== Binary verification ==="
+          file objs/nginx
+          ldd objs/nginx 2>&1 || echo "✅ Static binary confirmed (no dynamic deps)"
+          ls -lh objs/nginx
+
+      # ── 6. 打包产物 ───────────────────────────────────────────────
+      - name: Strip and package
+        shell: bash
+        run: |
+          OPENSSL_VER="${{ steps.openssl.outputs.version }}"
+          NGINX_VER="${{ steps.nginx.outputs.version }}"
+          ARCHIVE="nginx-${NGINX_VER}_openssl-${OPENSSL_VER}_linux-amd64-static.tar.gz"
+
+          strip "nginx-${NGINX_VER}/objs/nginx"
+          tar czf "${ARCHIVE}" -C "nginx-${NGINX_VER}/objs" nginx
+
+          echo "📦 Output: ${ARCHIVE} ($(ls -lh "${ARCHIVE}" | awk '{print $5}'))"
+          echo "archive_name=${ARCHIVE}" >> "$GITHUB_ENV"
+
+      # ── 7. 上传 Artifact ──────────────────────────────────────────
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nginx-binary
-          path: objs/nginx
+          name: nginx-${{ steps.nginx.outputs.version }}-openssl-${{ steps.openssl.outputs.version }}-static
+          path: "*.tar.gz"
+          retention-days: 30
