@@ -24,11 +24,25 @@ jobs:
       - name: Install build dependencies
         run: |
           apk add --no-cache \
-            bash curl wget \
-            build-base perl linux-headers \
-            pcre2-dev pcre2-static \
-            zlib-dev zlib-static
-
+             linux-headers \
+             musl-dev \
+             cmake \
+             build-base \
+             pcre-dev \
+             pcre-static \
+             zlib-dev \
+             zlib-static \
+             curl \
+             tar \
+             bash \
+             vim \
+             git \
+             perl \
+             tzdata \
+             ca-certificates \
+             jq \
+             brotli-dev \
+             brotli-static
       # ── 2. 解析 OpenSSL 最新小版本号 ─────────────────────────────
       - name: Resolve latest OpenSSL version
         id: openssl
