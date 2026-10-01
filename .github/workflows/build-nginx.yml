@@ -38,6 +38,7 @@ jobs:
              vim \
              git \
              perl \
+             pcre-static \
              tzdata \
              ca-certificates \
              jq \
