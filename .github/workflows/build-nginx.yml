@@ -16,6 +16,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # 发布 Release 需要
     container:
       image: alpine:3.21   # musl libc，天然适合全静态编译
 
@@ -40,6 +42,7 @@ jobs:
              tzdata \
              ca-certificates \
              jq \
+             github-cli \
              brotli-dev \
              brotli-static
       # ── 2. 解析 OpenSSL 最新小版本号 ─────────────────────────────
@@ -239,10 +242,28 @@ jobs:
           echo "📦 Output: ${ARCHIVE} ($(ls -lh "${ARCHIVE}" | awk '{print $5}'))"
           echo "archive_name=${ARCHIVE}" >> "$GITHUB_ENV"
 
-      # ── 7. 上传 Artifact ──────────────────────────────────────────
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: nginx-${{ steps.nginx.outputs.version }}-openssl-${{ steps.openssl.outputs.version }}-static
-          path: "*.tar.gz"
-          retention-days: 30
+      # ── 7. 发布到 Releases（固定 latest，只保留一个最新文件）──────
+      - name: Publish to GitHub Releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCHIVE: ${{ env.archive_name }}
+        run: |
+          set -euo pipefail
+          TAG="latest"
+
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # 删掉旧资产，保证 release 下只有一个文件
+            gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' \
+              | while read -r asset; do
+                  echo "🗑️ Deleting old asset: ${asset}"
+                  gh release delete-asset "$TAG" "$asset" -R "$GITHUB_REPOSITORY" --yes
+                done
+            gh release upload "$TAG" "$ARCHIVE" -R "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" "$ARCHIVE" -R "$GITHUB_REPOSITORY" \
+              --title "nginx static build (linux-amd64)" \
+              --notes "nginx-${{ steps.nginx.outputs.version }} + openssl-${{ steps.openssl.outputs.version }} 全静态编译"
+          fi
+
+          echo "🚀 Released: ${ARCHIVE} -> tag ${TAG}"
