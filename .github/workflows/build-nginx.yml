@@ -149,6 +149,10 @@ jobs:
             -O nginx_cookie_flag_module.tar.gz
           tar xzf nginx_cookie_flag_module.tar.gz
 
+          # ngx_brotli 依赖 deps/brotli 子模块，GitHub archive 不含子模块，必须 git clone
+          git clone --recursive --depth 1 \
+            https://github.com/google/ngx_brotli.git ngx_brotli
+
 
       # ── 5. 静态编译 ───────────────────────────────────────────────
       - name: Configure and build static Nginx
@@ -157,6 +161,14 @@ jobs:
           set -euo pipefail
           OPENSSL_VER="${{ steps.openssl.outputs.version }}"
           NGINX_VER="${{ steps.nginx.outputs.version }}"
+
+          # ── 编译静态 brotli 库（filter 需要 enc+common，static 还需要 dec）──
+          ( cd ngx_brotli/deps/brotli \
+            && mkdir -p out && cd out \
+            && cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+                 -DCMAKE_C_FLAGS="-O2" .. \
+            && cmake --build . --config Release \
+                 --target brotlienc brotlicommon brotlidec -j"$(nproc)" )
 
           cd "nginx-${NGINX_VER}"
 
@@ -201,6 +213,7 @@ jobs:
             --add-module="../headers-more-nginx-module-master" \
             --add-module="../nginx-http-flv-module-master" \
             --add-module="../nginx_cookie_flag_module-master" \
+            --add-module="../ngx_brotli" \
             --with-cc-opt="-O2" \
             --with-ld-opt="-static -lpthread -ldl -lstdc++ -lm"
 
