@@ -29,7 +29,6 @@ jobs:
              cmake \
              build-base \
              pcre-dev \
-             pcre-static \
              zlib-dev \
              zlib-static \
              curl \
@@ -38,7 +37,6 @@ jobs:
              vim \
              git \
              perl \
-             pcre-static \
              tzdata \
              ca-certificates \
              jq \
