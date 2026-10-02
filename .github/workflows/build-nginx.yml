@@ -35,7 +35,6 @@ jobs:
              musl-dev \
              cmake \
              build-base \
-             pcre2-dev \
              zlib-dev \
              zlib-static \
              curl \
@@ -145,6 +144,14 @@ jobs:
           tar xzf "openssl-${OPENSSL_VER}.tar.gz"
           tar xzf "nginx-${NGINX_VER}.tar.gz"
 
+          # PCRE2 源码（由 nginx --with-pcre 自行静态编译，不依赖系统包）
+          PCRE2_TAG=$(curl -sf https://api.github.com/repos/PCRE2Project/pcre2/releases/latest \
+            | grep -oE '"tag_name": *"pcre2-[0-9.]+"' | cut -d'"' -f4)
+          [[ -z "$PCRE2_TAG" ]] && { echo "❌ Cannot resolve latest PCRE2 version"; exit 1; }
+          echo "📦 PCRE2: ${PCRE2_TAG}"
+          wget -q "https://github.com/PCRE2Project/pcre2/releases/download/${PCRE2_TAG}/pcre2-${PCRE2_TAG#pcre2-}.tar.gz"
+          tar xzf "pcre2-${PCRE2_TAG#pcre2-}.tar.gz"
+
           wget -q https://github.com/openresty/headers-more-nginx-module/archive/refs/heads/master.tar.gz \
             -O headers-more-nginx-module.tar.gz
           tar xzf headers-more-nginx-module.tar.gz
@@ -169,6 +176,9 @@ jobs:
           set -euo pipefail
           OPENSSL_VER="${{ steps.openssl.outputs.version }}"
           NGINX_VER="${{ steps.nginx.outputs.version }}"
+
+          PCRE2_DIR=$(ls -d pcre2-* | head -1)
+          [[ -z "$PCRE2_DIR" ]] && { echo "❌ PCRE2 source directory not found"; exit 1; }
 
           # ── 编译静态 brotli 库（filter 需要 enc+common，static 还需要 dec）──
           ( cd ngx_brotli/deps/brotli \
@@ -218,6 +228,7 @@ jobs:
             --without-http_ssi_module \
             --with-openssl="../openssl-${OPENSSL_VER}" \
             --with-openssl-opt="no-shared no-async" \
+            --with-pcre="../${PCRE2_DIR}" \
             --add-module="../headers-more-nginx-module-master" \
             --add-module="../nginx-http-flv-module-master" \
             --add-module="../nginx_cookie_flag_module-master" \
