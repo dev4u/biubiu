@@ -3,7 +3,7 @@ name: Build Static Nginx
 
 on:
   schedule:
-    - cron: '3 8 * * *'   # UTC 08:03 = 北京时间 16:03，每天一次（避开整点高峰）
+    - cron: '3 14 * * *'   # UTC 08:03 = 北京时间 16:03，每天一次（避开整点高峰）
   workflow_dispatch:
     inputs:
       openssl_major:
