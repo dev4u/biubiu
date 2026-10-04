@@ -1,19 +1,24 @@
 # .github/workflows/build-nginx-static.yml
 name: Build Static Nginx
 
+# ── 默认版本前缀（schedule 触发时 inputs 为空，回退到这里；改版本只动这一处）──
+env:
+  OPENSSL_MAJOR_DEFAULT: '4.0'
+  NGINX_MAJOR_DEFAULT: '1.31'
+
 on:
   schedule:
-    - cron: '3 14 * * *'
+    - cron: '0 1 * * *'   # UTC 01:00 = 北京时间 09:00，每天一次
   workflow_dispatch:
     inputs:
       openssl_major:
-        description: 'OpenSSL 版本前缀 (如: 3.4 / 3.3 / 3.2 / 1.1.1)'
-        required: true
-        default: '4.0'
+        description: 'OpenSSL 版本前缀 (如: 3.4 / 3.3 / 3.2 / 1.1.1)，留空使用默认值'
+        required: false
+        default: ''
       nginx_major:
-        description: 'Nginx 版本前缀 (如: 1.28 / 1.26 / 1.25)'
-        required: true
-        default: '1.31'
+        description: 'Nginx 版本前缀 (如: 1.31 / 1.28 / 1.26)，留空使用默认值'
+        required: false
+        default: ''
 
 jobs:
   build:
@@ -55,7 +60,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          PREFIX="${{ inputs.openssl_major }}"
+          PREFIX="${{ inputs.openssl_major || env.OPENSSL_MAJOR_DEFAULT }}"
           ESCAPED="${PREFIX//./\\.}"
 
           echo "🔍 Searching OpenSSL ${PREFIX}.x ..."
@@ -102,7 +107,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          PREFIX="${{ inputs.nginx_major }}"
+          PREFIX="${{ inputs.nginx_major || env.NGINX_MAJOR_DEFAULT }}"   # schedule 触发时 inputs 为空，回退默认值
           ESCAPED="${PREFIX//./\\.}"
 
           echo "🔍 Searching Nginx ${PREFIX}.x ..."
