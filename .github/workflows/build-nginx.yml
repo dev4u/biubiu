@@ -53,7 +53,8 @@ jobs:
              jq \
              github-cli \
              brotli-dev \
-             brotli-static
+             brotli-static \
+             file
       # ── 2. 解析 OpenSSL 最新小版本号 ─────────────────────────────
       - name: Resolve latest OpenSSL version
         id: openssl
@@ -101,7 +102,18 @@ jobs:
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "✅ OpenSSL: ${VER}"
 
-      # ── 3. 解析 Nginx 最新小版本号 ───────────────────────────────
+      # ── 3. 恢复 OpenSSL 工具链缓存 ───────────────────────────────
+      # key 精确到小版本：openssl 不升级则永远命中，升级后自动 miss 重建。
+      # 故意不用 restore-keys——绝不能让旧小版本的库冒充新版本。
+      # v1 是构建配置版本号：以后改 Configure 选项时把它升成 v2 即可全员失效。
+      - name: Restore OpenSSL toolchain cache
+        id: openssl-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: toolchain
+          key: openssl-toolchain-${{ steps.openssl.outputs.version }}-v1
+
+      # ── 4. 解析 Nginx 最新小版本号 ───────────────────────────────
       - name: Resolve latest Nginx version
         id: nginx
         shell: bash
@@ -122,25 +134,32 @@ jobs:
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "✅ Nginx: ${VER}"
 
-      # ── 4. 下载源码 ───────────────────────────────────────────────
+      # ── 5. 下载源码 ───────────────────────────────────────────────
       - name: Download sources
         shell: bash
         run: |
           set -euo pipefail
           OPENSSL_VER="${{ steps.openssl.outputs.version }}"
           NGINX_VER="${{ steps.nginx.outputs.version }}"
-          MINOR_PREFIX="${OPENSSL_VER%.*}"
 
-          # 优先 current source，回退到 old archive
-          PRIMARY="https://www.openssl.org/source/openssl-${OPENSSL_VER}.tar.gz"
-          FALLBACK="https://www.openssl.org/source/old/${MINOR_PREFIX}/openssl-${OPENSSL_VER}.tar.gz"
+          # OpenSSL 源码仅在缓存未命中（需要自建工具链）时才下载
+          if [[ "${{ steps.openssl-cache.outputs.cache-hit }}" != "true" ]]; then
+            MINOR_PREFIX="${OPENSSL_VER%.*}"
 
-          if wget -q --spider "${PRIMARY}" 2>/dev/null; then
-            echo "📦 OpenSSL (current): ${PRIMARY}"
-            wget -q "${PRIMARY}"
+            # 优先 current source，回退到 old archive
+            PRIMARY="https://www.openssl.org/source/openssl-${OPENSSL_VER}.tar.gz"
+            FALLBACK="https://www.openssl.org/source/old/${MINOR_PREFIX}/openssl-${OPENSSL_VER}.tar.gz"
+
+            if wget -q --spider "${PRIMARY}" 2>/dev/null; then
+              echo "📦 OpenSSL (current): ${PRIMARY}"
+              wget -q "${PRIMARY}"
+            else
+              echo "📦 OpenSSL (archive): ${FALLBACK}"
+              wget -q "${FALLBACK}"
+            fi
+            tar xzf "openssl-${OPENSSL_VER}.tar.gz"
           else
-            echo "📦 OpenSSL (archive): ${FALLBACK}"
-            wget -q "${FALLBACK}"
+            echo "⏭️ Toolchain cache hit, skip OpenSSL source download"
           fi
 
           echo "📦 Nginx: https://nginx.org/download/nginx-${NGINX_VER}.tar.gz"
@@ -174,12 +193,70 @@ jobs:
             https://github.com/google/ngx_brotli.git ngx_brotli
 
 
-      # ── 5. 静态编译 ───────────────────────────────────────────────
-      - name: Configure and build static Nginx
+      # ── 6. OpenSSL 工具链：命中缓存直接用，未命中才编译 ──────────
+      # 工具链 = install_sw(bin/include/静态.a) + install_ssldirs(ssl/openssl.cnf)。
+      # nginx 不再用 --with-openssl 内嵌编译 openssl，改为 -I/-L 直接链接这套静态库，
+      # 因此 openssl 只在版本变化时编译一次，之后全程走缓存。
+      # 注意：缓存目录必须放 workspace 内（toolchain/），actions/cache 在容器 job 里
+      # 从宿主侧读写，看不到容器内的 /tmp。
+      - name: Build and package static OpenSSL toolchain
         shell: bash
         run: |
           set -euo pipefail
           OPENSSL_VER="${{ steps.openssl.outputs.version }}"
+          TOOLCHAIN_DIR="$GITHUB_WORKSPACE/toolchain"
+
+          if [[ -x "$TOOLCHAIN_DIR/usr/local/bin/openssl" ]]; then
+            echo "🎯 Cache hit for OpenSSL ${OPENSSL_VER}, skip building"
+            CACHED_VER=$("$TOOLCHAIN_DIR/usr/local/bin/openssl" version)
+            [[ "$CACHED_VER" == "OpenSSL ${OPENSSL_VER}"* ]] \
+              || { echo "❌ Cached toolchain version mismatch: ${CACHED_VER}"; exit 1; }
+          else
+            echo "🔨 Cache miss, building OpenSSL ${OPENSSL_VER} toolchain ..."
+
+            cp -a "openssl-${OPENSSL_VER}" openssl-toolchain
+            cd openssl-toolchain
+
+            # no-shared: 只出静态库    no-async: musl 静态编译必需
+            # no-module: provider 编进 libcrypto（全静态 CLI 无法 dlopen 外部 .so）
+            # -static:   Configure 认识该选项并透传给编译/链接器，CLI 全静态
+            ./config --prefix=/usr/local no-shared no-async no-module -static
+
+            make -j"$(nproc)" build_sw
+            make install_sw install_ssldirs DESTDIR="$TOOLCHAIN_DIR"
+
+            OPENSSL_BIN="$TOOLCHAIN_DIR/usr/local/bin/openssl"
+            [[ -x "$OPENSSL_BIN" ]] || { echo "❌ openssl binary missing after install"; exit 1; }
+
+            echo "=== OpenSSL toolchain verification ==="
+            file "$OPENSSL_BIN"
+            ldd "$OPENSSL_BIN" 2>&1 || echo "✅ Fully static binary confirmed"
+            "$OPENSSL_BIN" version -a
+            "$OPENSSL_BIN" list -providers
+
+            strip "$OPENSSL_BIN"
+          fi
+
+          # 装进容器的 /usr/local，供 nginx 用 -I/-L 链接（容器每轮全新，无残留）
+          cp -a "$TOOLCHAIN_DIR/usr/local/." /usr/local/
+
+          ARCHIVE="openssl-${OPENSSL_VER}_linux-amd64-static.tar.gz"
+          tar czf "${ARCHIVE}" -C "$TOOLCHAIN_DIR/usr/local" .
+          echo "📦 Output: ${ARCHIVE} ($(ls -lh "${ARCHIVE}" | awk '{print $5}'))"
+          echo "openssl_archive_name=${ARCHIVE}" >> "$GITHUB_ENV"
+
+      - name: Save OpenSSL toolchain cache
+        if: steps.openssl-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: toolchain
+          key: openssl-toolchain-${{ steps.openssl.outputs.version }}-v1
+
+      # ── 7. 静态编译 ───────────────────────────────────────────────
+      - name: Configure and build static Nginx
+        shell: bash
+        run: |
+          set -euo pipefail
           NGINX_VER="${{ steps.nginx.outputs.version }}"
 
           PCRE2_DIR=$(ls -d pcre2-* | head -1)
@@ -195,6 +272,8 @@ jobs:
 
           cd "nginx-${NGINX_VER}"
 
+          # OpenSSL：-I/-L 链接上一步装入 /usr/local 的工具链静态库
+          # （gcc 默认搜索路径本就含 /usr/local，显式 -I/-L 只是加固）
           ./configure \
             --prefix=/usr/local/nginx \
             --error-log-path=/var/log/nginx/error.log \
@@ -231,15 +310,13 @@ jobs:
             --without-mail_imap_module \
             --without-mail_smtp_module \
             --without-http_ssi_module \
-            --with-openssl="../openssl-${OPENSSL_VER}" \
-            --with-openssl-opt="no-shared no-async" \
             --with-pcre="../${PCRE2_DIR}" \
             --add-module="../headers-more-nginx-module-master" \
             --add-module="../nginx-http-flv-module-master" \
             --add-module="../nginx_cookie_flag_module-master" \
             --add-module="../ngx_brotli" \
-            --with-cc-opt="-O2" \
-            --with-ld-opt="-static -lpthread -ldl -lstdc++ -lm"
+            --with-cc-opt="-O2 -I/usr/local/include" \
+            --with-ld-opt="-static -L/usr/local/lib -lpthread -ldl -lstdc++ -lm"
 
           make -j$(nproc)
 
@@ -249,7 +326,7 @@ jobs:
           ldd objs/nginx 2>&1 || echo "✅ Static binary confirmed (no dynamic deps)"
           ls -lh objs/nginx
 
-      # ── 6. 打包产物 ───────────────────────────────────────────────
+      # ── 8. 打包产物 ───────────────────────────────────────────────
       - name: Strip and package
         shell: bash
         run: |
@@ -263,33 +340,34 @@ jobs:
           echo "📦 Output: ${ARCHIVE} ($(ls -lh "${ARCHIVE}" | awk '{print $5}'))"
           echo "archive_name=${ARCHIVE}" >> "$GITHUB_ENV"
 
-      # ── 7. 发布到 Releases（固定 latest，只保留一个最新文件）──────
+      # ── 9. 发布到 Releases（固定 latest，保留最新的一对文件）──────
       - name: Publish to GitHub Releases
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           ARCHIVE: ${{ env.archive_name }}
+          OPENSSL_ARCHIVE: ${{ env.openssl_archive_name }}
         run: |
           set -euo pipefail
           TAG="latest"
 
           if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            # 删掉旧资产，保证 release 下只有一个文件
+            # 删掉旧资产，保证 release 下只有最新的一对文件
             gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' \
               | while read -r asset; do
                   echo "🗑️ Deleting old asset: ${asset}"
                   gh release delete-asset "$TAG" "$asset" -R "$GITHUB_REPOSITORY" --yes
                 done
-            gh release upload "$TAG" "$ARCHIVE" -R "$GITHUB_REPOSITORY" --clobber
+            gh release upload "$TAG" "$ARCHIVE" "$OPENSSL_ARCHIVE" -R "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$TAG" "$ARCHIVE" -R "$GITHUB_REPOSITORY" \
+            gh release create "$TAG" "$ARCHIVE" "$OPENSSL_ARCHIVE" -R "$GITHUB_REPOSITORY" \
               --title "nginx static build (linux-amd64)" \
               --notes "nginx-${{ steps.nginx.outputs.version }} + openssl-${{ steps.openssl.outputs.version }} 全静态编译"
           fi
 
-          echo "🚀 Released: ${ARCHIVE} -> tag ${TAG}"
+          echo "🚀 Released: ${ARCHIVE} + ${OPENSSL_ARCHIVE} -> tag ${TAG}"
 
-  # ── 8. Telegram 通知（成功失败都发）──────────────────────────
+  # ── 10. Telegram 通知（成功失败都发）─────────────────────────
   notify:
     needs: build
     runs-on: ubuntu-latest
