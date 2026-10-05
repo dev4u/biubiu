@@ -303,9 +303,10 @@ jobs:
           NGINX_VER: ${{ needs.build.outputs.nginx_ver }}
           OPENSSL_VER: ${{ needs.build.outputs.openssl_ver }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TRIGGER: ${{ github.event_name == 'schedule' && '⏰ 定时' || github.event_name == 'workflow_dispatch' && '🔧 手动' || github.event_name }}
         run: |
           if [[ "$RESULT" == "success" ]]; then ICON="✅"; else ICON="❌"; fi
-          TEXT="${ICON} [nginx-build] ${RESULT} | nginx: ${NGINX_VER:-?} / openssl: ${OPENSSL_VER:-?}
+          TEXT="${ICON} [nginx-build] ${RESULT} (${TRIGGER}) | nginx: ${NGINX_VER:-?} / openssl: ${OPENSSL_VER:-?}
           ${RUN_URL}"
           curl -sS --fail -o /dev/null -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
             -d chat_id="${TG_CHAT}" \
