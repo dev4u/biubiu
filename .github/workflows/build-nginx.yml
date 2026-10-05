@@ -235,6 +235,7 @@ jobs:
             "$OPENSSL_BIN" list -providers
 
             strip "$OPENSSL_BIN"
+            cd "$GITHUB_WORKSPACE"   # miss 分支进过 openssl-toolchain/，切回工作区根目录
           fi
 
           # 装进容器的 /usr/local，供 nginx 用 -I/-L 链接（容器每轮全新，无残留）
