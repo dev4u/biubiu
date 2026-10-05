@@ -164,8 +164,6 @@ jobs:
 
           echo "📦 Nginx: https://nginx.org/download/nginx-${NGINX_VER}.tar.gz"
           wget -q "https://nginx.org/download/nginx-${NGINX_VER}.tar.gz"
-
-          tar xzf "openssl-${OPENSSL_VER}.tar.gz"
           tar xzf "nginx-${NGINX_VER}.tar.gz"
 
           # PCRE2 源码（由 nginx --with-pcre 自行静态编译，不依赖系统包）
