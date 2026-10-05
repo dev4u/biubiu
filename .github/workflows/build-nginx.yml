@@ -240,7 +240,8 @@ jobs:
           cp -a "$TOOLCHAIN_DIR/usr/local/." /usr/local/
 
           ARCHIVE="openssl-${OPENSSL_VER}_linux-amd64-static.tar.gz"
-          tar czf "${ARCHIVE}" -C "$TOOLCHAIN_DIR/usr/local" .
+          # 带 usr/local 前缀打包，解压到 / 即并入 /usr/local
+          tar czf "${ARCHIVE}" -C "$TOOLCHAIN_DIR" usr/local
           echo "📦 Output: ${ARCHIVE} ($(ls -lh "${ARCHIVE}" | awk '{print $5}'))"
           echo "openssl_archive_name=${ARCHIVE}" >> "$GITHUB_ENV"
 
@@ -315,7 +316,7 @@ jobs:
             --add-module="../nginx_cookie_flag_module-master" \
             --add-module="../ngx_brotli" \
             --with-cc-opt="-O2 -I/usr/local/include" \
-            --with-ld-opt="-static -L/usr/local/lib -lpthread -ldl -lstdc++ -lm"
+            --with-ld-opt="-static -L/usr/local/lib64 -lpthread -ldl -lstdc++ -lm"
 
           make -j$(nproc)
 
