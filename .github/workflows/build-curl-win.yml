@@ -307,12 +307,18 @@ jobs:
           done
 
           # ── ngtcp2（需检测到 OpenSSL QUIC，即 >= 3.5）──
+          # configure 内部用 AC_LINK_IFELSE 实测 QUIC 接口；静态 libcrypto 需要
+          # -lcrypt32 -lws2_32（pkg-config 默认不带 Libs.private），否则链接测试
+          # 失败 → 静默禁用 crypto 后端。--with-openssl 让检测失败变成硬错误。
           NGTCP2_VER="${{ steps.versions.outputs.ngtcp2 }}"
           echo "🔨 Building ngtcp2 ${NGTCP2_VER} ..."
+          test -f "$STAGE/lib/pkgconfig/openssl.pc" \
+            || { echo "❌ openssl.pc missing (OpenSSL install_dev incomplete)"; exit 1; }
           cd "ngtcp2-${NGTCP2_VER}"
           PKG_CONFIG_PATH="$STAGE/lib/pkgconfig" PKG_CONFIG_LIBDIR="$STAGE/lib/pkgconfig" \
             ./configure --host="$HOST" --prefix="$STAGE" \
-              --enable-lib-only --disable-shared
+              --enable-lib-only --disable-shared --with-openssl \
+              LIBS="-lcrypt32 -lws2_32"
           make -j"$NCPU" && make install
           cd "$GITHUB_WORKSPACE"
 
