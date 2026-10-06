@@ -356,8 +356,7 @@ jobs:
           export PKG_CONFIG_LIBDIR="$STAGE/lib/pkgconfig"
 
           # -static：链接器全静态（含 libgcc/pthread），产物只依赖系统 DLL
-          # LIBS：OpenSSL 静态库在 mingw 下需要 crypt32/gdi32/ws2_32
-          #       （即 openssl mingw64 目标 ex_libs 的完整列表）
+          # LIBS：mingw 全静态链接所需系统库全集（多余无害，链接器按需抽取）
           ./configure --host="$HOST" --prefix="$STAGE" \
             --with-openssl="$STAGE" \
             --with-ngtcp2="$STAGE" --with-nghttp3="$STAGE" \
@@ -366,9 +365,17 @@ jobs:
             --disable-shared --enable-static \
             --disable-ldap --disable-ldaps \
             --without-libpsl --without-libssh2 --without-libidn2 --without-librtmp \
-            LDFLAGS="-static" LIBS="-lcrypt32 -lgdi32 -lws2_32"
+            LDFLAGS="-static" \
+            LIBS="-lcrypt32 -lgdi32 -lws2_32 -lsecur32 -liphlpapi -lbcrypt -lncrypt -lnormaliz -luser32 -ladvapi32"
 
-          make -j"$NCPU"
+          # 失败时打印符号级错误摘要，定位缺哪个库
+          if ! make -j"$NCPU" 2>&1 | tee build.log; then
+            echo ""
+            echo "=== 🔍 Undefined / duplicate symbols ==="
+            grep -oE "undefined reference to \`[^']+'|multiple definition of \`[^']+'" build.log \
+              | sort | uniq -c | sort -rn | head -30
+            exit 1
+          fi
 
           echo ""
           echo "=== configure protocol/features summary ==="
