@@ -156,6 +156,18 @@ jobs:
           set -euo pipefail
           OSSL_VER="${{ steps.versions.outputs.openssl }}"
 
+          # 可诊断+可重试的下载：不用 -q（吞掉错误），429/5xx 自动重试 5 次
+          fetch() {
+            local url="$1" out="${2:-}"
+            local -a OPTS=(-nv --tries=5 --waitretry=5 --timeout=60
+                            --retry-on-http-error=429,500,502,503,504)
+            if [[ -n "$out" ]]; then
+              wget "${OPTS[@]}" -O "$out" "$url"
+            else
+              wget "${OPTS[@]}" "$url"
+            fi
+          }
+
           if [[ "${{ steps.deps-cache.outputs.cache-hit }}" != "true" ]]; then
             # ── OpenSSL：current → old 归档 ──
             MINOR_PREFIX="${OSSL_VER%.*}"
@@ -163,10 +175,10 @@ jobs:
             FALLBACK="https://www.openssl.org/source/old/${MINOR_PREFIX}/openssl-${OSSL_VER}.tar.gz"
             if wget -q --spider "${PRIMARY}" 2>/dev/null; then
               echo "📦 OpenSSL (current): ${PRIMARY}"
-              wget -q "${PRIMARY}"
+              fetch "${PRIMARY}"
             else
               echo "📦 OpenSSL (archive): ${FALLBACK}"
-              wget -q "${FALLBACK}"
+              fetch "${FALLBACK}"
             fi
             tar xzf "openssl-${OSSL_VER}.tar.gz"
 
@@ -183,18 +195,22 @@ jobs:
               eval "VER=\${${name^^}_VER}"
               URL="https://github.com/${REPO}/releases/download/v${VER}/${name}-${VER}.tar.xz"
               echo "📦 ${name}: ${URL}"
-              wget -q "${URL}" && tar xf "${name}-${VER}.tar.xz"
+              fetch "${URL}" "${name}-${VER}.tar.xz"
+              tar xf "${name}-${VER}.tar.xz"
             done
 
             # ── 压缩库：GitHub archive（cmake 项目无需 bootstrap）──
             ZLIB_VER="${{ steps.versions.outputs.zlib }}"
             BROTLI_VER="${{ steps.versions.outputs.brotli }}"
             ZSTD_VER="${{ steps.versions.outputs.zstd }}"
-            wget -q "https://github.com/madler/zlib/archive/refs/tags/${ZLIB_VER}.tar.gz" -O zlib.tar.gz
+            echo "📦 zlib: madler/zlib tag ${ZLIB_VER}"
+            fetch "https://github.com/madler/zlib/archive/refs/tags/${ZLIB_VER}.tar.gz" zlib.tar.gz
             tar xzf zlib.tar.gz   # → zlib-${ZLIB_VER}/
-            wget -q "https://github.com/google/brotli/archive/refs/tags/v${BROTLI_VER}.tar.gz" -O brotli.tar.gz
+            echo "📦 brotli: google/brotli tag v${BROTLI_VER}"
+            fetch "https://github.com/google/brotli/archive/refs/tags/v${BROTLI_VER}.tar.gz" brotli.tar.gz
             tar xzf brotli.tar.gz # → brotli-${BROTLI_VER}/
-            wget -q "https://github.com/facebook/zstd/archive/refs/tags/v${ZSTD_VER}.tar.gz" -O zstd.tar.gz
+            echo "📦 zstd: facebook/zstd tag v${ZSTD_VER}"
+            fetch "https://github.com/facebook/zstd/archive/refs/tags/v${ZSTD_VER}.tar.gz" zstd.tar.gz
             tar xzf zstd.tar.gz   # → zstd-${ZSTD_VER}/
           else
             echo "⏭️ Toolchain cache hit, skip dependency source download"
@@ -205,7 +221,8 @@ jobs:
           CURL_TAG="curl-${CURL_VER//./_}"
           URL="https://github.com/curl/curl/releases/download/${CURL_TAG}/curl-${CURL_VER}.tar.xz"
           echo "📦 curl: ${URL}"
-          wget -q "${URL}" && tar xf "curl-${CURL_VER}.tar.xz"
+          fetch "${URL}" "curl-${CURL_VER}.tar.xz"
+          tar xf "curl-${CURL_VER}.tar.xz"
 
       # ── 5. 交叉编译全部依赖（缓存未命中才执行）────────────────────
       # 产物统一装进 stage/（headers + 静态 .a + pkgconfig），供 curl 检索。
@@ -370,7 +387,7 @@ jobs:
           mkdir pkg
           cp "$EXE" pkg/curl.exe
           # Windows 版 curl 会自动加载 exe 同目录下的 curl-ca-bundle.crt
-          curl -sfL https://curl.se/ca/cacert.pem -o pkg/curl-ca-bundle.crt
+          curl -sfL --retry 5 --retry-all-errors https://curl.se/ca/cacert.pem -o pkg/curl-ca-bundle.crt
           cat > pkg/README.txt <<EOF
           curl ${CURL_VER} — Windows x64 静态编译 (HTTP/3)
 
