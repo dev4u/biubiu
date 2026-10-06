@@ -263,10 +263,17 @@ jobs:
           echo "🔨 Building OpenSSL ${OSSL_VER} ..."
           cd "openssl-${OSSL_VER}"
           ./Configure mingw64 no-shared no-async no-tests no-docs \
-            --cross-compile-prefix="${HOST}-" --prefix="$STAGE"
+            --cross-compile-prefix="${HOST}-" --prefix="$STAGE" --libdir=lib
+          # --libdir=lib：mingw64 目标默认装到 lib64/（同 nginx 工具链当年的
+          # lib64 问题），而 ngtcp2/curl 的 pkg-config 只找 lib/pkgconfig
           make -j"$NCPU" build_libs
           make install_dev   # headers + 静态库 + pkgconfig，不含 CLI
           cd "$GITHUB_WORKSPACE"
+
+          echo "=== stage layout after OpenSSL install ==="
+          ls "$STAGE/lib/" | head -20
+          ls "$STAGE/lib/pkgconfig/" 2>/dev/null \
+            || { echo "❌ stage/lib/pkgconfig 仍不存在，OpenSSL 安装布局异常"; find "$STAGE" -name '*.pc' | head; }
 
           # ── zlib ──
           ZLIB_VER="${{ steps.versions.outputs.zlib }}"
