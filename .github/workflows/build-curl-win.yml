@@ -49,7 +49,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          api() { curl -sf "https://api.github.com/repos/$1/releases/latest" | jq -r .tag_name; }
+          export GH_TOKEN="${{ github.token }}"   # 提高匿名 60/h 的 API 限额
+          api() { curl -sf -H "Authorization: Bearer $GH_TOKEN" "$@"; }
+
+          # 先试 releases/latest（会排除 pre-release，可能 404），
+          # 失败则回退 tags API 取最新 semver tag
+          latest_tag() {
+            local repo="$1" tag=""
+            tag=$(api "https://api.github.com/repos/${repo}/releases/latest" \
+              | jq -r '.tag_name // empty' 2>/dev/null || true)
+            if [[ -z "$tag" ]]; then
+              tag=$(api "https://api.github.com/repos/${repo}/tags?per_page=100" \
+                | jq -r '.[].name' 2>/dev/null \
+                | grep -E '^v?[0-9]+(\.[0-9]+)+$' | sort -V | tail -1 || true)
+            fi
+            echo "$tag"
+          }
           strip_v() { echo "${1#v}"; }
 
           # ── curl（带前缀，同 nginx workflow 的 tags API 翻页查找）──
@@ -58,7 +73,7 @@ jobs:
           echo "🔍 Searching curl ${CURL_PREFIX}.x ..."
           CURL_TAG=""
           for PAGE in 1 2 3 4 5; do
-            RAW=$(curl -sf "https://api.github.com/repos/curl/curl/tags?per_page=100&page=${PAGE}") || break
+            RAW=$(api "https://api.github.com/repos/curl/curl/tags?per_page=100&page=${PAGE}") || break
             [[ -z "$RAW" || "$RAW" == "[]" ]] && break
             MATCH=$(echo "$RAW" | jq -r '.[].name' \
               | grep -E "^${TAGPFX}(_[0-9]+)?$" | sort -V | tail -1 || true)
@@ -85,7 +100,7 @@ jobs:
           fi
           if [[ -z "$OSSL_VER" ]]; then
             for PAGE in 1 2 3 4 5; do
-              RAW=$(curl -sf \
+              RAW=$(api \
                 "https://api.github.com/repos/openssl/openssl/tags?per_page=100&page=${PAGE}") || break
               [[ -z "$RAW" || "$RAW" == "[]" ]] && break
               MATCH=$(echo "$RAW" | jq -r '.[].name' \
@@ -99,12 +114,21 @@ jobs:
           echo "✅ OpenSSL: ${OSSL_VER}"
 
           # ── HTTP/3 / 压缩依赖：一律最新 release ──
-          NGHTTP3_VER=$(strip_v "$(api nghttp2/nghttp3)")
-          NGTCP2_VER=$(strip_v "$(api ngtcp2/ngtcp2)")
-          NGHTTP2_VER=$(strip_v "$(api nghttp2/nghttp2)")
-          ZLIB_VER=$(strip_v "$(api madler/zlib)")
-          BROTLI_VER=$(strip_v "$(api google/brotli)")
-          ZSTD_VER=$(strip_v "$(api facebook/zstd)")
+          NGHTTP3_VER=$(strip_v "$(latest_tag nghttp2/nghttp3)")
+          NGTCP2_VER=$(strip_v "$(latest_tag ngtcp2/ngtcp2)")
+          NGHTTP2_VER=$(strip_v "$(latest_tag nghttp2/nghttp2)")
+          ZLIB_VER=$(strip_v "$(latest_tag madler/zlib)")
+          BROTLI_VER=$(strip_v "$(latest_tag google/brotli)")
+          ZSTD_VER=$(strip_v "$(latest_tag facebook/zstd)")
+
+          # 任一版本解析为空立即报错，绝不拼出坏 URL
+          for pair in "nghttp3:${NGHTTP3_VER}" "ngtcp2:${NGTCP2_VER}" \
+                      "nghttp2:${NGHTTP2_VER}" "zlib:${ZLIB_VER}" \
+                      "brotli:${BROTLI_VER}" "zstd:${ZSTD_VER}"; do
+            NAME="${pair%%:*}"
+            [[ -n "${pair#*:}" && "${pair#*:}" != "null" ]] \
+              || { echo "❌ Cannot resolve latest version of ${NAME}"; exit 1; }
+          done
 
           echo "nghttp3=${NGHTTP3_VER}"  >> "$GITHUB_OUTPUT"
           echo "ngtcp2=${NGTCP2_VER}"    >> "$GITHUB_OUTPUT"
