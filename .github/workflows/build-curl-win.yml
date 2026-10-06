@@ -295,7 +295,7 @@ jobs:
           ZSTD_VER="${{ steps.versions.outputs.zstd }}"
           echo "🔨 Building zstd ${ZSTD_VER} ..."
           cmake -S "zstd-${ZSTD_VER}/build/cmake" -B build-zstd -DCMAKE_TOOLCHAIN_FILE="$TC" \
-            -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON \
+            -DZSTD_BUILD_SHARED=OFF -DZSTD_BUILD_STATIC=ON \
             -DZSTD_BUILD_PROGRAMS=OFF -DZSTD_BUILD_TESTS=OFF \
             -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$STAGE"
           cmake --build build-zstd -j"$NCPU" --target install
@@ -355,6 +355,11 @@ jobs:
           export PKG_CONFIG_PATH="$STAGE/lib/pkgconfig"
           export PKG_CONFIG_LIBDIR="$STAGE/lib/pkgconfig"
 
+          # 防御：清掉 stage 里任何共享库残留（如旧缓存的 libzstd.dll），
+          # 保证 -lzstd 这类检索只会命中静态库
+          rm -f "$STAGE/lib"/*.dll "$STAGE/lib"/*.dll.a
+          ls "$STAGE/lib"/*.dll* 2>/dev/null && { echo "❌ stage 中仍有共享库"; exit 1; } || true
+
           # -static：链接器全静态（含 libgcc/pthread），产物只依赖系统 DLL
           # LIBS：mingw 全静态链接所需系统库全集（多余无害，链接器按需抽取）
           # CFLAGS：nghttp2/ngtcp2/nghttp3 头文件在 Windows 下默认 dllimport，
@@ -403,7 +408,7 @@ jobs:
           # 2) 动态依赖只能是系统 DLL（全静态验证）
           echo "=== Imported DLLs ==="
           x86_64-w64-mingw32-objdump -p "$EXE" | grep 'DLL Name' | awk '{print $3}' | tee dlls.txt
-          BAD=$(grep -ivE '^(kernel32|ws2_32|advapi32|user32|gdi32|crypt32|secur32|bcrypt|ncrypt|msvcrt|ntdll|normaliz|ucrtbase|winmm|ole32|shell32|version)\.dll$' dlls.txt || true)
+          BAD=$(grep -ivE '^(kernel32|ws2_32|advapi32|user32|gdi32|crypt32|secur32|bcrypt|ncrypt|msvcrt|ntdll|normaliz|ucrtbase|winmm|ole32|shell32|version|iphlpapi)\.dll$' dlls.txt || true)
           [[ -z "$BAD" ]] || { echo "❌ Non-system dynamic deps:"; echo "$BAD"; exit 1; }
           echo "✅ Only system DLLs imported (fully static)"
 
