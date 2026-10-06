@@ -1,0 +1,417 @@
+# .github/workflows/build-curl-win.yml
+name: Build Static curl (Windows x64, HTTP/3)
+
+# ── 默认版本前缀（schedule 触发时 inputs 为空，回退到这里；改版本只动这一处）──
+# OpenSSL 必须 >= 3.5（自带 QUIC API，3.5 是 LTS）；4.x 也可通过 input 试
+env:
+  CURL_MAJOR_DEFAULT: '8.22'
+  OPENSSL_MAJOR_DEFAULT: '4.0'
+
+on:
+  # schedule:
+  #   - cron: '0 2 */3 * *'   # UTC 02:00 = 北京时间 10:00，每 3 天一次
+  workflow_dispatch:
+    inputs:
+      curl_major:
+        description: 'curl 版本前缀 (如: 8.16)，留空使用默认值'
+        required: false
+        default: ''
+      openssl_major:
+        description: 'OpenSSL 版本前缀 (如: 3.5 / 4.0)，留空使用默认值'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # 发布 Release 需要
+    outputs:
+      curl_ver: ${{ steps.versions.outputs.curl }}
+      openssl_ver: ${{ steps.versions.outputs.openssl }}
+
+    steps:
+      # ── 1. 安装编译依赖 ──────────────────────────────────────────
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential autoconf automake libtool pkg-config \
+            cmake ninja-build perl xz-utils zip jq curl wget file \
+            mingw-w64 ca-certificates
+          # wine 仅用于运行验证，装不上不影响构建
+          sudo apt-get install -y --no-install-recommends wine64 \
+            || echo "⚠️ wine64 不可用，跳过运行验证"
+
+      # ── 2. 解析全部版本号 ─────────────────────────────────────────
+      - name: Resolve versions
+        id: versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          api() { curl -sf "https://api.github.com/repos/$1/releases/latest" | jq -r .tag_name; }
+          strip_v() { echo "${1#v}"; }
+
+          # ── curl（带前缀，同 nginx workflow 的 tags API 翻页查找）──
+          CURL_PREFIX="${{ inputs.curl_major || env.CURL_MAJOR_DEFAULT }}"
+          TAGPFX="curl-${CURL_PREFIX//./_}"
+          echo "🔍 Searching curl ${CURL_PREFIX}.x ..."
+          CURL_TAG=""
+          for PAGE in 1 2 3 4 5; do
+            RAW=$(curl -sf "https://api.github.com/repos/curl/curl/tags?per_page=100&page=${PAGE}") || break
+            [[ -z "$RAW" || "$RAW" == "[]" ]] && break
+            MATCH=$(echo "$RAW" | jq -r '.[].name' \
+              | grep -E "^${TAGPFX}(_[0-9]+)?$" | sort -V | tail -1 || true)
+            [[ -n "$MATCH" ]] && CURL_TAG="$MATCH" && break
+            [[ $(echo "$RAW" | jq length) -lt 100 ]] && break
+          done
+          [[ -z "$CURL_TAG" ]] && { echo "❌ No curl found for prefix: ${CURL_PREFIX}"; exit 1; }
+          CURL_VER="${CURL_TAG#curl-}"; CURL_VER="${CURL_VER//_/.}"
+          echo "curl=${CURL_VER}" >> "$GITHUB_OUTPUT"
+          echo "✅ curl: ${CURL_VER}"
+
+          # ── OpenSSL（前缀查找：source 页 → old 归档 → tags API）──
+          OSSL_PREFIX="${{ inputs.openssl_major || env.OPENSSL_MAJOR_DEFAULT }}"
+          ESCAPED="${OSSL_PREFIX//./\\.}"
+          echo "🔍 Searching OpenSSL ${OSSL_PREFIX}.x ..."
+          OSSL_VER=""
+          OSSL_VER=$(curl -sf "https://www.openssl.org/source/" \
+            | grep -oE "openssl-${ESCAPED}(\.[0-9]+|[a-z])\.tar\.gz" \
+            | sed 's/\.tar\.gz//' | sort -V | tail -1 || true)
+          if [[ -z "$OSSL_VER" ]]; then
+            OSSL_VER=$(curl -sf "https://www.openssl.org/source/old/${OSSL_PREFIX}/" \
+              | grep -oE "openssl-${ESCAPED}(\.[0-9]+|[a-z])\.tar\.gz" \
+              | sed 's/\.tar\.gz//' | sort -V | tail -1 || true)
+          fi
+          if [[ -z "$OSSL_VER" ]]; then
+            for PAGE in 1 2 3 4 5; do
+              RAW=$(curl -sf \
+                "https://api.github.com/repos/openssl/openssl/tags?per_page=100&page=${PAGE}") || break
+              [[ -z "$RAW" || "$RAW" == "[]" ]] && break
+              MATCH=$(echo "$RAW" | jq -r '.[].name' \
+                | grep -E "^openssl-${ESCAPED}(\.[0-9]+|[a-z])$" | sort -V | tail -1 || true)
+              [[ -n "$MATCH" ]] && OSSL_VER="${MATCH#openssl-}" && break
+              [[ $(echo "$RAW" | jq length) -lt 100 ]] && break
+            done
+          fi
+          [[ -z "$OSSL_VER" ]] && { echo "❌ No OpenSSL found for prefix: ${OSSL_PREFIX}"; exit 1; }
+          echo "openssl=${OSSL_VER}" >> "$GITHUB_OUTPUT"
+          echo "✅ OpenSSL: ${OSSL_VER}"
+
+          # ── HTTP/3 / 压缩依赖：一律最新 release ──
+          NGHTTP3_VER=$(strip_v "$(api nghttp2/nghttp3)")
+          NGTCP2_VER=$(strip_v "$(api ngtcp2/ngtcp2)")
+          NGHTTP2_VER=$(strip_v "$(api nghttp2/nghttp2)")
+          ZLIB_VER=$(strip_v "$(api madler/zlib)")
+          BROTLI_VER=$(strip_v "$(api google/brotli)")
+          ZSTD_VER=$(strip_v "$(api facebook/zstd)")
+
+          echo "nghttp3=${NGHTTP3_VER}"  >> "$GITHUB_OUTPUT"
+          echo "ngtcp2=${NGTCP2_VER}"    >> "$GITHUB_OUTPUT"
+          echo "nghttp2=${NGHTTP2_VER}"  >> "$GITHUB_OUTPUT"
+          echo "zlib=${ZLIB_VER}"        >> "$GITHUB_OUTPUT"
+          echo "brotli=${BROTLI_VER}"    >> "$GITHUB_OUTPUT"
+          echo "zstd=${ZSTD_VER}"        >> "$GITHUB_OUTPUT"
+          echo "✅ nghttp3: ${NGHTTP3_VER} / ngtcp2: ${NGTCP2_VER} / nghttp2: ${NGHTTP2_VER}"
+          echo "✅ zlib: ${ZLIB_VER} / brotli: ${BROTLI_VER} / zstd: ${ZSTD_VER}"
+
+      # ── 3. 恢复依赖工具链缓存 ─────────────────────────────────────
+      # 8 个依赖版本任一变化则 key 失配自动重建；v1 是构建配置版本号。
+      # 不用 restore-keys——绝不能让旧版本库冒充新版本。
+      - name: Restore dependency toolchain cache
+        id: deps-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: stage
+          key: curl-win-toolchain-${{ steps.versions.outputs.curl }}-${{ steps.versions.outputs.openssl }}-${{ steps.versions.outputs.nghttp3 }}-${{ steps.versions.outputs.ngtcp2 }}-${{ steps.versions.outputs.nghttp2 }}-${{ steps.versions.outputs.zlib }}-${{ steps.versions.outputs.brotli }}-${{ steps.versions.outputs.zstd }}-v1
+
+      # ── 4. 下载源码（依赖仅缓存未命中时下载）──────────────────────
+      - name: Download sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          OSSL_VER="${{ steps.versions.outputs.openssl }}"
+
+          if [[ "${{ steps.deps-cache.outputs.cache-hit }}" != "true" ]]; then
+            # ── OpenSSL：current → old 归档 ──
+            MINOR_PREFIX="${OSSL_VER%.*}"
+            PRIMARY="https://www.openssl.org/source/openssl-${OSSL_VER}.tar.gz"
+            FALLBACK="https://www.openssl.org/source/old/${MINOR_PREFIX}/openssl-${OSSL_VER}.tar.gz"
+            if wget -q --spider "${PRIMARY}" 2>/dev/null; then
+              echo "📦 OpenSSL (current): ${PRIMARY}"
+              wget -q "${PRIMARY}"
+            else
+              echo "📦 OpenSSL (archive): ${FALLBACK}"
+              wget -q "${FALLBACK}"
+            fi
+            tar xzf "openssl-${OSSL_VER}.tar.gz"
+
+            # ── HTTP/3 库：release 资产（已 bootstrap 的 autotools tarball）──
+            NGHTTP3_VER="${{ steps.versions.outputs.nghttp3 }}"
+            NGTCP2_VER="${{ steps.versions.outputs.ngtcp2 }}"
+            NGHTTP2_VER="${{ steps.versions.outputs.nghttp2 }}"
+            for name in nghttp3 ngtcp2 nghttp2; do
+              eval "VER=\${${name^^}_VER}"
+              URL="https://github.com/nghttp2/${name}/releases/download/v${VER}/${name}-${VER}.tar.xz"
+              echo "📦 ${name}: ${URL}"
+              wget -q "${URL}" && tar xf "${name}-${VER}.tar.xz"
+            done
+
+            # ── 压缩库：GitHub archive（cmake 项目无需 bootstrap）──
+            ZLIB_VER="${{ steps.versions.outputs.zlib }}"
+            BROTLI_VER="${{ steps.versions.outputs.brotli }}"
+            ZSTD_VER="${{ steps.versions.outputs.zstd }}"
+            wget -q "https://github.com/madler/zlib/archive/refs/tags/${ZLIB_VER}.tar.gz" -O zlib.tar.gz
+            tar xzf zlib.tar.gz   # → zlib-${ZLIB_VER}/
+            wget -q "https://github.com/google/brotli/archive/refs/tags/v${BROTLI_VER}.tar.gz" -O brotli.tar.gz
+            tar xzf brotli.tar.gz # → brotli-${BROTLI_VER}/
+            wget -q "https://github.com/facebook/zstd/archive/refs/tags/v${ZSTD_VER}.tar.gz" -O zstd.tar.gz
+            tar xzf zstd.tar.gz   # → zstd-${ZSTD_VER}/
+          else
+            echo "⏭️ Toolchain cache hit, skip dependency source download"
+          fi
+
+          # ── curl 本体每次都要现编，不在缓存内 ──
+          CURL_VER="${{ steps.versions.outputs.curl }}"
+          CURL_TAG="curl-${CURL_VER//./_}"
+          URL="https://github.com/curl/curl/releases/download/${CURL_TAG}/curl-${CURL_VER}.tar.xz"
+          echo "📦 curl: ${URL}"
+          wget -q "${URL}" && tar xf "curl-${CURL_VER}.tar.xz"
+
+      # ── 5. 交叉编译全部依赖（缓存未命中才执行）────────────────────
+      # 产物统一装进 stage/（headers + 静态 .a + pkgconfig），供 curl 检索。
+      - name: Cross-build dependencies
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          NCPU=$(nproc)
+          HOST=x86_64-w64-mingw32
+
+          cat > "$GITHUB_WORKSPACE/mingw-toolchain.cmake" <<'EOF'
+          set(CMAKE_SYSTEM_NAME Windows)
+          set(CMAKE_SYSTEM_PROCESSOR AMD64)
+          set(CMAKE_C_COMPILER x86_64-w64-mingw32-gcc)
+          set(CMAKE_RC_COMPILER x86_64-w64-mingw32-windres)
+          set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+          set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+          set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+          EOF
+          TC="$GITHUB_WORKSPACE/mingw-toolchain.cmake"
+
+          # ── OpenSSL（QUIC API 默认编入；no-async 是 mingw 交叉的常规选项）──
+          OSSL_VER="${{ steps.versions.outputs.openssl }}"
+          echo "🔨 Building OpenSSL ${OSSL_VER} ..."
+          cd "openssl-${OSSL_VER}"
+          ./Configure mingw64 no-shared no-async no-tests no-docs \
+            --cross-compile-prefix="${HOST}-" --prefix="$STAGE"
+          make -j"$NCPU" build_libs
+          make install_dev   # headers + 静态库 + pkgconfig，不含 CLI
+          cd "$GITHUB_WORKSPACE"
+
+          # ── zlib ──
+          ZLIB_VER="${{ steps.versions.outputs.zlib }}"
+          echo "🔨 Building zlib ${ZLIB_VER} ..."
+          cmake -S "zlib-${ZLIB_VER}" -B build-zlib -DCMAKE_TOOLCHAIN_FILE="$TC" \
+            -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$STAGE"
+          cmake --build build-zlib -j"$NCPU" --target install
+
+          # ── brotli ──
+          BROTLI_VER="${{ steps.versions.outputs.brotli }}"
+          echo "🔨 Building brotli ${BROTLI_VER} ..."
+          cmake -S "brotli-${BROTLI_VER}" -B build-brotli -DCMAKE_TOOLCHAIN_FILE="$TC" \
+            -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$STAGE"
+          cmake --build build-brotli -j"$NCPU" --target install
+
+          # ── zstd ──
+          ZSTD_VER="${{ steps.versions.outputs.zstd }}"
+          echo "🔨 Building zstd ${ZSTD_VER} ..."
+          cmake -S "zstd-${ZSTD_VER}/build/cmake" -B build-zstd -DCMAKE_TOOLCHAIN_FILE="$TC" \
+            -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON \
+            -DZSTD_BUILD_PROGRAMS=OFF -DZSTD_BUILD_TESTS=OFF \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$STAGE"
+          cmake --build build-zstd -j"$NCPU" --target install
+
+          # ── nghttp2 / nghttp3 ──
+          NGHTTP2_VER="${{ steps.versions.outputs.nghttp2 }}"
+          NGHTTP3_VER="${{ steps.versions.outputs.nghttp3 }}"
+          for name in nghttp2 nghttp3; do
+            eval "VER=\${${name^^}_VER}"
+            echo "🔨 Building ${name} ${VER} ..."
+            cd "${name}-${VER}"
+            ./configure --host="$HOST" --prefix="$STAGE" \
+              --enable-lib-only --disable-shared
+            make -j"$NCPU" && make install
+            cd "$GITHUB_WORKSPACE"
+          done
+
+          # ── ngtcp2（需检测到 OpenSSL QUIC，即 >= 3.5）──
+          NGTCP2_VER="${{ steps.versions.outputs.ngtcp2 }}"
+          echo "🔨 Building ngtcp2 ${NGTCP2_VER} ..."
+          cd "ngtcp2-${NGTCP2_VER}"
+          PKG_CONFIG_PATH="$STAGE/lib/pkgconfig" PKG_CONFIG_LIBDIR="$STAGE/lib/pkgconfig" \
+            ./configure --host="$HOST" --prefix="$STAGE" \
+              --enable-lib-only --disable-shared
+          make -j"$NCPU" && make install
+          cd "$GITHUB_WORKSPACE"
+
+          # ── 自检：QUIC 加密后端必须存在 ──
+          ls "$STAGE/lib/" | grep -E "libngtcp2_crypto.*\.a" \
+            || { echo "❌ ngtcp2 crypto backend missing (OpenSSL QUIC not detected?)"; exit 1; }
+          echo "✅ All dependencies built into stage/"
+
+      - name: Save dependency toolchain cache
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: stage
+          key: curl-win-toolchain-${{ steps.versions.outputs.curl }}-${{ steps.versions.outputs.openssl }}-${{ steps.versions.outputs.nghttp3 }}-${{ steps.versions.outputs.ngtcp2 }}-${{ steps.versions.outputs.nghttp2 }}-${{ steps.versions.outputs.zlib }}-${{ steps.versions.outputs.brotli }}-${{ steps.versions.outputs.zstd }}-v1
+
+      # ── 6. 静态编译 curl ─────────────────────────────────────────
+      - name: Cross-build static curl
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          NCPU=$(nproc)
+          HOST=x86_64-w64-mingw32
+          CURL_VER="${{ steps.versions.outputs.curl }}"
+
+          cd "curl-${CURL_VER}"
+          export PKG_CONFIG_PATH="$STAGE/lib/pkgconfig"
+          export PKG_CONFIG_LIBDIR="$STAGE/lib/pkgconfig"
+
+          # -static：链接器全静态（含 libgcc/pthread），产物只依赖系统 DLL
+          # LIBS：OpenSSL 静态库在 mingw 下需要 crypt32/ws2_32
+          ./configure --host="$HOST" --prefix="$STAGE" \
+            --with-openssl="$STAGE" \
+            --with-ngtcp2="$STAGE" --with-nghttp3="$STAGE" \
+            --with-nghttp2="$STAGE" \
+            --with-zlib="$STAGE" --with-brotli --with-zstd \
+            --disable-shared --enable-static \
+            --disable-ldap --disable-ldaps \
+            --without-libpsl --without-libssh2 --without-libidn2 --without-librtmp \
+            LDFLAGS="-static" LIBS="-lcrypt32 -lws2_32"
+
+          make -j"$NCPU"
+
+          echo ""
+          echo "=== configure protocol/features summary ==="
+          grep -A5 -i "protocols" config.log | head -20 || true
+
+      # ── 7. 验证 + 打包 ───────────────────────────────────────────
+      - name: Verify and package
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          CURL_VER="${{ steps.versions.outputs.curl }}"
+          OSSL_VER="${{ steps.versions.outputs.openssl }}"
+          EXE="$GITHUB_WORKSPACE/curl-${CURL_VER}/src/curl.exe"
+
+          # 1) HTTP/3 符号必须编进 exe（strip 前检查）
+          NM=x86_64-w64-mingw32-nm
+          [[ $("$NM" "$EXE" | grep -ci ngtcp2) -gt 0 ]] || { echo "❌ ngtcp2 symbols missing — HTTP/3 not built in"; exit 1; }
+          [[ $("$NM" "$EXE" | grep -ci nghttp3) -gt 0 ]] || { echo "❌ nghttp3 symbols missing — HTTP/3 not built in"; exit 1; }
+          echo "✅ HTTP/3 symbols confirmed in binary"
+
+          # 2) 动态依赖只能是系统 DLL（全静态验证）
+          echo "=== Imported DLLs ==="
+          x86_64-w64-mingw32-objdump -p "$EXE" | grep 'DLL Name' | awk '{print $3}' | tee dlls.txt
+          BAD=$(grep -ivE '^(kernel32|ws2_32|advapi32|user32|gdi32|crypt32|secur32|bcrypt|ncrypt|msvcrt|ntdll|normaliz|ucrtbase|winmm|ole32|shell32|version)\.dll$' dlls.txt || true)
+          [[ -z "$BAD" ]] || { echo "❌ Non-system dynamic deps:"; echo "$BAD"; exit 1; }
+          echo "✅ Only system DLLs imported (fully static)"
+
+          # 3) wine 试跑（尽力而为，失败不阻断）
+          if command -v wine64 >/dev/null 2>&1; then
+            echo "=== wine runtime check ==="
+            WINEDEBUG=-all wine64 "$EXE" -V || echo "⚠️ wine run failed (non-fatal)"
+          else
+            echo "⏭️ wine unavailable, skip runtime check"
+          fi
+
+          # 4) strip + 打包
+          x86_64-w64-mingw32-strip "$EXE"
+          file "$EXE"
+          ls -lh "$EXE"
+
+          mkdir pkg
+          cp "$EXE" pkg/curl.exe
+          # Windows 版 curl 会自动加载 exe 同目录下的 curl-ca-bundle.crt
+          curl -sfL https://curl.se/ca/cacert.pem -o pkg/curl-ca-bundle.crt
+          cat > pkg/README.txt <<EOF
+          curl ${CURL_VER} — Windows x64 静态编译 (HTTP/3)
+
+          TLS/QUIC : OpenSSL ${OSSL_VER} (native QUIC) + ngtcp2 + nghttp3
+          压缩     : zlib + brotli + zstd
+          HTTP/2   : nghttp2
+
+          启用 HTTP/3:  curl --http3-only https://cloudflare-quic.com
+          CA 证书    :  同目录 curl-ca-bundle.crt 自动加载（或 --cacert 指定）
+
+          本 exe 为全静态链接，无任何第三方 DLL 依赖，单文件即可运行。
+          未签名，首次运行可能触发 SmartScreen 提示，属正常现象。
+          EOF
+
+          ARCHIVE="curl-${CURL_VER}_win-x64-http3-static.zip"
+          ( cd pkg && zip -r "../${ARCHIVE}" . )
+          echo "📦 Output: ${ARCHIVE} ($(ls -lh "${ARCHIVE}" | awk '{print $5}'))"
+          echo "archive_name=${ARCHIVE}" >> "$GITHUB_ENV"
+
+          # 5) 开发包：libcurl.a + 依赖静态库 + 头文件（供程序静态链接）
+          DEV="curl-${CURL_VER}_win-x64-static-deps.tar.gz"
+          tar czf "${DEV}" -C "$STAGE" include lib
+          echo "📦 Output: ${DEV} ($(ls -lh "${DEV}" | awk '{print $5}'))"
+          echo "dev_archive_name=${DEV}" >> "$GITHUB_ENV"
+
+      # ── 8. 发布到 Releases（独立 tag，避免和 nginx 的 latest 冲突）──
+      - name: Publish to GitHub Releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCHIVE: ${{ env.archive_name }}
+          DEV_ARCHIVE: ${{ env.dev_archive_name }}
+        run: |
+          set -euo pipefail
+          TAG="curl-win64-latest"
+
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' \
+              | while read -r asset; do
+                  echo "🗑️ Deleting old asset: ${asset}"
+                  gh release delete-asset "$TAG" "$asset" -R "$GITHUB_REPOSITORY" --yes
+                done
+            gh release upload "$TAG" "$ARCHIVE" "$DEV_ARCHIVE" -R "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" "$ARCHIVE" "$DEV_ARCHIVE" -R "$GITHUB_REPOSITORY" \
+              --title "curl static build (win-x64, HTTP/3)" \
+              --notes "curl-${{ steps.versions.outputs.curl }} + openssl-${{ steps.versions.outputs.openssl }} (QUIC) + ngtcp2/nghttp3 全静态编译"
+          fi
+
+          echo "🚀 Released: ${ARCHIVE} + ${DEV_ARCHIVE} -> tag ${TAG}"
+
+  # ── 9. Telegram 通知（成功失败都发）─────────────────────────
+  notify:
+    needs: build
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Send Telegram notification
+        env:
+          TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RESULT: ${{ needs.build.result }}
+          CURL_VER: ${{ needs.build.outputs.curl_ver }}
+          OPENSSL_VER: ${{ needs.build.outputs.openssl_ver }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TRIGGER: ${{ github.event_name == 'schedule' && '⏰ 定时' || github.event_name == 'workflow_dispatch' && '🔧 手动' || github.event_name }}
+        run: |
+          if [[ "$RESULT" == "success" ]]; then ICON="✅"; else ICON="❌"; fi
+          TEXT="${ICON} [curl-win-build] ${RESULT} (${TRIGGER}) | curl: ${CURL_VER:-?} / openssl: ${OPENSSL_VER:-?}
+          ${RUN_URL}"
+          curl -sS --fail -o /dev/null -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+            -d chat_id="${TG_CHAT}" \
+            --data-urlencode "text=${TEXT}"
