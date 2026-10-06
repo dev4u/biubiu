@@ -177,6 +177,7 @@ jobs:
             for name in nghttp3 ngtcp2 nghttp2; do
               case "$name" in
                 nghttp3) REPO="ngtcp2/nghttp3" ;;   # nghttp3 已迁到 ngtcp2 org
+                ngtcp2)  REPO="ngtcp2/ngtcp2" ;;    # ngtcp2 同样迁到了 ngtcp2 org
                 *)       REPO="nghttp2/$name" ;;
               esac
               eval "VER=\${${name^^}_VER}"
