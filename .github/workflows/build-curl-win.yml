@@ -357,6 +357,8 @@ jobs:
 
           # -static：链接器全静态（含 libgcc/pthread），产物只依赖系统 DLL
           # LIBS：mingw 全静态链接所需系统库全集（多余无害，链接器按需抽取）
+          # CFLAGS：nghttp2/ngtcp2/nghttp3 头文件在 Windows 下默认 dllimport，
+          #         必须定义 *_STATICLIB 才能链接静态库（否则全是 __imp_ 符号）
           ./configure --host="$HOST" --prefix="$STAGE" \
             --with-openssl="$STAGE" \
             --with-ngtcp2="$STAGE" --with-nghttp3="$STAGE" \
@@ -365,6 +367,7 @@ jobs:
             --disable-shared --enable-static \
             --disable-ldap --disable-ldaps \
             --without-libpsl --without-libssh2 --without-libidn2 --without-librtmp \
+            CFLAGS="-O2 -DNGHTTP2_STATICLIB -DNGTCP2_STATICLIB -DNGHTTP3_STATICLIB" \
             LDFLAGS="-static" \
             LIBS="-lcrypt32 -lgdi32 -lws2_32 -lsecur32 -liphlpapi -lbcrypt -lncrypt -lnormaliz -luser32 -ladvapi32"
 
@@ -430,6 +433,10 @@ jobs:
 
           启用 HTTP/3:  curl --http3-only https://cloudflare-quic.com
           CA 证书    :  同目录 curl-ca-bundle.crt 自动加载（或 --cacert 指定）
+
+          静态链接 libcurl.a 时需加编译宏:
+          -DNGHTTP2_STATICLIB -DNGTCP2_STATICLIB -DNGHTTP3_STATICLIB
+          并链接系统库: -lcrypt32 -lgdi32 -lws2_32 -lsecur32 -liphlpapi -lbcrypt
 
           本 exe 为全静态链接，无任何第三方 DLL 依赖，单文件即可运行。
           未签名，首次运行可能触发 SmartScreen 提示，属正常现象。
