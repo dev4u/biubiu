@@ -114,7 +114,7 @@ jobs:
           echo "✅ OpenSSL: ${OSSL_VER}"
 
           # ── HTTP/3 / 压缩依赖：一律最新 release ──
-          NGHTTP3_VER=$(strip_v "$(latest_tag nghttp2/nghttp3)")
+          NGHTTP3_VER=$(strip_v "$(latest_tag ngtcp2/nghttp3)")   # nghttp3 已迁到 ngtcp2 org 下
           NGTCP2_VER=$(strip_v "$(latest_tag ngtcp2/ngtcp2)")
           NGHTTP2_VER=$(strip_v "$(latest_tag nghttp2/nghttp2)")
           ZLIB_VER=$(strip_v "$(latest_tag madler/zlib)")
@@ -175,8 +175,12 @@ jobs:
             NGTCP2_VER="${{ steps.versions.outputs.ngtcp2 }}"
             NGHTTP2_VER="${{ steps.versions.outputs.nghttp2 }}"
             for name in nghttp3 ngtcp2 nghttp2; do
+              case "$name" in
+                nghttp3) REPO="ngtcp2/nghttp3" ;;   # nghttp3 已迁到 ngtcp2 org
+                *)       REPO="nghttp2/$name" ;;
+              esac
               eval "VER=\${${name^^}_VER}"
-              URL="https://github.com/nghttp2/${name}/releases/download/v${VER}/${name}-${VER}.tar.xz"
+              URL="https://github.com/${REPO}/releases/download/v${VER}/${name}-${VER}.tar.xz"
               echo "📦 ${name}: ${URL}"
               wget -q "${URL}" && tar xf "${name}-${VER}.tar.xz"
             done
