@@ -117,14 +117,16 @@ jobs:
           NGHTTP3_VER=$(strip_v "$(latest_tag ngtcp2/nghttp3)")   # nghttp3 已迁到 ngtcp2 org 下
           NGTCP2_VER=$(strip_v "$(latest_tag ngtcp2/ngtcp2)")
           NGHTTP2_VER=$(strip_v "$(latest_tag nghttp2/nghttp2)")
-          ZLIB_VER=$(strip_v "$(latest_tag madler/zlib)")
-          BROTLI_VER=$(strip_v "$(latest_tag google/brotli)")
-          ZSTD_VER=$(strip_v "$(latest_tag facebook/zstd)")
+          # 压缩库保留原始 tag（tag 前缀形状不假设：zlib 1.3.2 起改用 v 前缀）
+          ZLIB_TAG=$(latest_tag madler/zlib)
+          BROTLI_TAG=$(latest_tag google/brotli)
+          ZSTD_TAG=$(latest_tag facebook/zstd)
+          ZLIB_VER="${ZLIB_TAG#v}"; BROTLI_VER="${BROTLI_TAG#v}"; ZSTD_VER="${ZSTD_TAG#v}"
 
           # 任一版本解析为空立即报错，绝不拼出坏 URL
           for pair in "nghttp3:${NGHTTP3_VER}" "ngtcp2:${NGTCP2_VER}" \
-                      "nghttp2:${NGHTTP2_VER}" "zlib:${ZLIB_VER}" \
-                      "brotli:${BROTLI_VER}" "zstd:${ZSTD_VER}"; do
+                      "nghttp2:${NGHTTP2_VER}" "zlib:${ZLIB_TAG}" \
+                      "brotli:${BROTLI_TAG}" "zstd:${ZSTD_TAG}"; do
             NAME="${pair%%:*}"
             [[ -n "${pair#*:}" && "${pair#*:}" != "null" ]] \
               || { echo "❌ Cannot resolve latest version of ${NAME}"; exit 1; }
@@ -136,6 +138,9 @@ jobs:
           echo "zlib=${ZLIB_VER}"        >> "$GITHUB_OUTPUT"
           echo "brotli=${BROTLI_VER}"    >> "$GITHUB_OUTPUT"
           echo "zstd=${ZSTD_VER}"        >> "$GITHUB_OUTPUT"
+          echo "zlib_tag=${ZLIB_TAG}"    >> "$GITHUB_OUTPUT"
+          echo "brotli_tag=${BROTLI_TAG}" >> "$GITHUB_OUTPUT"
+          echo "zstd_tag=${ZSTD_TAG}"    >> "$GITHUB_OUTPUT"
           echo "✅ nghttp3: ${NGHTTP3_VER} / ngtcp2: ${NGTCP2_VER} / nghttp2: ${NGHTTP2_VER}"
           echo "✅ zlib: ${ZLIB_VER} / brotli: ${BROTLI_VER} / zstd: ${ZSTD_VER}"
 
@@ -200,17 +205,21 @@ jobs:
             done
 
             # ── 压缩库：GitHub archive（cmake 项目无需 bootstrap）──
+            # URL 用原始 tag（v 前缀由 tag 自带）；解压目录名 GitHub 自动去 v
+            ZLIB_TAG="${{ steps.versions.outputs.zlib_tag }}"
+            BROTLI_TAG="${{ steps.versions.outputs.brotli_tag }}"
+            ZSTD_TAG="${{ steps.versions.outputs.zstd_tag }}"
             ZLIB_VER="${{ steps.versions.outputs.zlib }}"
             BROTLI_VER="${{ steps.versions.outputs.brotli }}"
             ZSTD_VER="${{ steps.versions.outputs.zstd }}"
-            echo "📦 zlib: madler/zlib tag ${ZLIB_VER}"
-            fetch "https://github.com/madler/zlib/archive/refs/tags/${ZLIB_VER}.tar.gz" zlib.tar.gz
+            echo "📦 zlib: madler/zlib tag ${ZLIB_TAG}"
+            fetch "https://github.com/madler/zlib/archive/refs/tags/${ZLIB_TAG}.tar.gz" zlib.tar.gz
             tar xzf zlib.tar.gz   # → zlib-${ZLIB_VER}/
-            echo "📦 brotli: google/brotli tag v${BROTLI_VER}"
-            fetch "https://github.com/google/brotli/archive/refs/tags/v${BROTLI_VER}.tar.gz" brotli.tar.gz
+            echo "📦 brotli: google/brotli tag ${BROTLI_TAG}"
+            fetch "https://github.com/google/brotli/archive/refs/tags/${BROTLI_TAG}.tar.gz" brotli.tar.gz
             tar xzf brotli.tar.gz # → brotli-${BROTLI_VER}/
-            echo "📦 zstd: facebook/zstd tag v${ZSTD_VER}"
-            fetch "https://github.com/facebook/zstd/archive/refs/tags/v${ZSTD_VER}.tar.gz" zstd.tar.gz
+            echo "📦 zstd: facebook/zstd tag ${ZSTD_TAG}"
+            fetch "https://github.com/facebook/zstd/archive/refs/tags/${ZSTD_TAG}.tar.gz" zstd.tar.gz
             tar xzf zstd.tar.gz   # → zstd-${ZSTD_VER}/
           else
             echo "⏭️ Toolchain cache hit, skip dependency source download"
