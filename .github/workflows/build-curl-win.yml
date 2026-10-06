@@ -325,7 +325,7 @@ jobs:
           PKG_CONFIG_PATH="$STAGE/lib/pkgconfig" PKG_CONFIG_LIBDIR="$STAGE/lib/pkgconfig" \
             ./configure --host="$HOST" --prefix="$STAGE" \
               --enable-lib-only --disable-shared --with-openssl \
-              LIBS="-lcrypt32 -lws2_32"
+              LIBS="-lcrypt32 -lgdi32 -lws2_32"
           make -j"$NCPU" && make install
           cd "$GITHUB_WORKSPACE"
 
@@ -356,7 +356,8 @@ jobs:
           export PKG_CONFIG_LIBDIR="$STAGE/lib/pkgconfig"
 
           # -static：链接器全静态（含 libgcc/pthread），产物只依赖系统 DLL
-          # LIBS：OpenSSL 静态库在 mingw 下需要 crypt32/ws2_32
+          # LIBS：OpenSSL 静态库在 mingw 下需要 crypt32/gdi32/ws2_32
+          #       （即 openssl mingw64 目标 ex_libs 的完整列表）
           ./configure --host="$HOST" --prefix="$STAGE" \
             --with-openssl="$STAGE" \
             --with-ngtcp2="$STAGE" --with-nghttp3="$STAGE" \
@@ -365,7 +366,7 @@ jobs:
             --disable-shared --enable-static \
             --disable-ldap --disable-ldaps \
             --without-libpsl --without-libssh2 --without-libidn2 --without-librtmp \
-            LDFLAGS="-static" LIBS="-lcrypt32 -lws2_32"
+            LDFLAGS="-static" LIBS="-lcrypt32 -lgdi32 -lws2_32"
 
           make -j"$NCPU"
 
