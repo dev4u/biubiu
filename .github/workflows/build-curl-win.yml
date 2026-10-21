@@ -4,7 +4,7 @@ name: Build Static curl (Windows x64, HTTP/3)
 # ── 默认版本前缀（schedule 触发时 inputs 为空，回退到这里；改版本只动这一处）──
 # OpenSSL 必须 >= 3.5（自带 QUIC API，3.5 是 LTS）；4.x 也可通过 input 试
 env:
-  CURL_MAJOR_DEFAULT: '8.22'
+  CURL_MAJOR_DEFAULT: '8.23'
   OPENSSL_MAJOR_DEFAULT: '4.0'
 
 on:
