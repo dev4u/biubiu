@@ -312,7 +312,7 @@ jobs:
             --without-http_ssi_module \
             --with-pcre="../${PCRE2_DIR}" \
             --add-module="../headers-more-nginx-module-master" \
-            --add-module="../nginx-http-flv-module-master" \
+            # --add-module="../nginx-http-flv-module-master" \
             --add-module="../nginx_cookie_flag_module-master" \
             --add-module="../ngx_brotli" \
             --with-cc-opt="-O2 -I/usr/local/include" \
