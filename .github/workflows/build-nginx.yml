@@ -327,10 +327,10 @@ jobs:
             --with-pcre="../${PCRE2_DIR}" \
             --add-module="../headers-more-nginx-module-master" \
             --add-module="../nginx_cookie_flag_module-master" \
+            --add-module="../nginx-http-flv-module-master" \
             --add-module="../ngx_brotli" \
             --with-cc-opt="-O2 -I/usr/local/include" \
             --with-ld-opt="-static -L/usr/local/lib64 -lpthread -ldl -lstdc++ -lm"
-            # --add-module="../nginx-http-flv-module-master" \
 
           make -j$(nproc)
 
