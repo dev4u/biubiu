@@ -3,8 +3,8 @@ name: Build Static Nginx
 
 # ── 默认版本前缀（schedule 触发时 inputs 为空，回退到这里；改版本只动这一处）──
 env:
-  OPENSSL_MAJOR_DEFAULT: '4.0'
-  NGINX_MAJOR_DEFAULT: '1.31'
+  OPENSSL_MAJOR_DEFAULT: '4'
+  NGINX_MAJOR_DEFAULT: '1'
 
 on:
   schedule:
