@@ -364,6 +364,7 @@ jobs:
         run: |
           set -euo pipefail
           TAG="latest"
+          NOTES="nginx-${{ steps.nginx.outputs.version }} + openssl-${{ steps.openssl.outputs.version }} 全静态编译"
 
           if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             # 删掉旧资产，保证 release 下只有最新的一对文件
@@ -372,11 +373,13 @@ jobs:
                   echo "🗑️ Deleting old asset: ${asset}"
                   gh release delete-asset "$TAG" "$asset" -R "$GITHUB_REPOSITORY" --yes
                 done
+            # 描述同步刷新为本轮构建的版本号
+            gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --notes "$NOTES"
             gh release upload "$TAG" "$ARCHIVE" "$OPENSSL_ARCHIVE" -R "$GITHUB_REPOSITORY" --clobber
           else
             gh release create "$TAG" "$ARCHIVE" "$OPENSSL_ARCHIVE" -R "$GITHUB_REPOSITORY" \
               --title "nginx static build (linux-amd64)" \
-              --notes "nginx-${{ steps.nginx.outputs.version }} + openssl-${{ steps.openssl.outputs.version }} 全静态编译"
+              --notes "$NOTES"
           fi
 
           echo "🚀 Released: ${ARCHIVE} + ${OPENSSL_ARCHIVE} -> tag ${TAG}"
