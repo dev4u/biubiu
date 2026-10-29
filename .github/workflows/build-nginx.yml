@@ -67,14 +67,17 @@ jobs:
           echo "🔍 Searching OpenSSL ${PREFIX}.x ..."
 
           # 优先：官方 source 页（当前维护版本）
-          LATEST=$(curl -sf "https://www.openssl.org/source/" \
-            | grep -oE "openssl-${ESCAPED}(\.[0-9]+|[a-z])\.tar\.gz" \
+          # (\.[0-9]+)*[a-z]? 兼容任意段数的版本号：openssl-4.1.0 / openssl-1.1.1w 都能匹配
+          # 域名用 openssl-library.org：旧域名 www.openssl.org 只有 /source/ 会重定向，
+          # /source/old/... 在旧域名下直接 404
+          LATEST=$(curl -sfL "https://openssl-library.org/source/" \
+            | grep -oE "openssl-${ESCAPED}(\.[0-9]+)*[a-z]?\.tar\.gz" \
             | sed 's/\.tar\.gz//' | sort -V | tail -1 || true)
 
-          # 其次：旧版归档页
+          # 其次：旧版归档页（前缀只有一段时该目录不存在，会 404，自然落到下面的 Tags 兜底）
           if [[ -z "$LATEST" ]]; then
-            LATEST=$(curl -sf "https://www.openssl.org/source/old/${PREFIX}/" \
-              | grep -oE "openssl-${ESCAPED}(\.[0-9]+|[a-z])\.tar\.gz" \
+            LATEST=$(curl -sfL "https://openssl-library.org/source/old/${PREFIX}/" \
+              | grep -oE "openssl-${ESCAPED}(\.[0-9]+)*[a-z]?\.tar\.gz" \
               | sed 's/\.tar\.gz//' | sort -V | tail -1 || true)
           fi
 
@@ -87,7 +90,7 @@ jobs:
 
               MATCH=$(echo "$RAW" \
                 | grep -oE '"openssl-[^"]+"' | tr -d '"' \
-                | grep -E "^openssl-${ESCAPED}(\.[0-9]+|[a-z])$" \
+                | grep -E "^openssl-${ESCAPED}(\.[0-9]+)*[a-z]?$" \
                 | sort -V | tail -1 || true)
               [[ -n "$MATCH" ]] && LATEST="$MATCH" && break
 
@@ -124,8 +127,10 @@ jobs:
 
           echo "🔍 Searching Nginx ${PREFIX}.x ..."
 
-          LATEST=$(curl -sf "https://nginx.org/en/download.html" \
-            | grep -oE "nginx-${ESCAPED}\.[0-9]+" \
+          # (\.[0-9]+)+ 至少吃一段完整的小版本号：前缀为 1 也能解析出 nginx-1.29.x，
+          # 否则会在第二个点处截断成 1.29，导致下一步下载 404
+          LATEST=$(curl -sfL "https://nginx.org/en/download.html" \
+            | grep -oE "nginx-${ESCAPED}(\.[0-9]+)+" \
             | sort -V | tail -1 || true)
 
           [[ -z "$LATEST" ]] && { echo "❌ No Nginx found for prefix: ${PREFIX}"; exit 1; }
@@ -144,20 +149,29 @@ jobs:
 
           # OpenSSL 源码仅在缓存未命中（需要自建工具链）时才下载
           if [[ "${{ steps.openssl-cache.outputs.cache-hit }}" != "true" ]]; then
-            MINOR_PREFIX="${OPENSSL_VER%.*}"
-
-            # 优先 current source，回退到 old archive
-            PRIMARY="https://www.openssl.org/source/openssl-${OPENSSL_VER}.tar.gz"
-            FALLBACK="https://www.openssl.org/source/old/${MINOR_PREFIX}/openssl-${OPENSSL_VER}.tar.gz"
+            # 优先 GitHub Release 资产（3.x/4.x 都有官方 tarball），
+            # 更老的版本（如 1.1.1w）没有 Release 资产，回退到 tag 归档。
+            # 注意：1.1.1/1.0.2 老线的 tag 是 OpenSSL_1_1_1w 这种下划线风格
+            if [[ "${OPENSSL_VER}" == 1.* ]]; then
+              GH_TAG="OpenSSL_${OPENSSL_VER//./_}"
+            else
+              GH_TAG="openssl-${OPENSSL_VER}"
+            fi
+            PRIMARY="https://github.com/openssl/openssl/releases/download/${GH_TAG}/openssl-${OPENSSL_VER}.tar.gz"
+            FALLBACK="https://github.com/openssl/openssl/archive/refs/tags/${GH_TAG}.tar.gz"
 
             if wget -q --spider "${PRIMARY}" 2>/dev/null; then
-              echo "📦 OpenSSL (current): ${PRIMARY}"
+              echo "📦 OpenSSL (release): ${PRIMARY}"
               wget -q "${PRIMARY}"
             else
-              echo "📦 OpenSSL (archive): ${FALLBACK}"
+              echo "📦 OpenSSL (tag archive): ${FALLBACK}"
               wget -q "${FALLBACK}"
             fi
             tar xzf "openssl-${OPENSSL_VER}.tar.gz"
+            # tag 归档的顶层目录是 <repo>-<tag>，统一改回 openssl-<ver>
+            if [[ ! -d "openssl-${OPENSSL_VER}" ]]; then
+              mv "openssl-${GH_TAG}" "openssl-${OPENSSL_VER}"
+            fi
           else
             echo "⏭️ Toolchain cache hit, skip OpenSSL source download"
           fi
