@@ -168,10 +168,11 @@ jobs:
             echo "⏭️ Toolchain cache hit, skip OpenSSL source download"
           fi
 
-          # 源码固定取 GitHub 官方仓库 master 分支；archive 顶层目录为 nginx-master
-          echo "📦 Nginx: https://github.com/nginx/nginx/archive/refs/heads/master.tar.gz"
-          wget -q https://github.com/nginx/nginx/archive/refs/heads/master.tar.gz -O nginx-master.tar.gz
-          tar xzf nginx-master.tar.gz
+          # 源码固定取 GitHub 官方仓库 master 分支。
+          # 用 git clone 而非 archive 下载：codeload 归档接口对无认证请求有频率限制，
+          # busybox wget（镜像未装 GNU wget）失败时 -q 静默退出且无重试
+          echo "📦 Nginx: git clone --depth 1 https://github.com/nginx/nginx.git (master)"
+          git clone --depth 1 --branch master https://github.com/nginx/nginx.git nginx-master
           # GitHub 仓库不含根目录 configure（官方 release tarball 独有）。
           # 已 diff 验证：auto/configure 与官方 tarball 根 configure 内容一致，直接复制补齐
           cp nginx-master/auto/configure nginx-master/configure
