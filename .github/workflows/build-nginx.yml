@@ -172,6 +172,10 @@ jobs:
           echo "📦 Nginx: https://github.com/nginx/nginx/archive/refs/heads/master.tar.gz"
           wget -q https://github.com/nginx/nginx/archive/refs/heads/master.tar.gz -O nginx-master.tar.gz
           tar xzf nginx-master.tar.gz
+          # GitHub 仓库不含根目录 configure（官方 release tarball 独有）。
+          # 已 diff 验证：auto/configure 与官方 tarball 根 configure 内容一致，直接复制补齐
+          cp nginx-master/auto/configure nginx-master/configure
+          chmod +x nginx-master/configure
 
           # PCRE2 源码（由 nginx --with-pcre 自行静态编译，不依赖系统包）
           PCRE2_TAG=$(curl -sf https://api.github.com/repos/PCRE2Project/pcre2/releases/latest \
