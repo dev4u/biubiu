@@ -23,6 +23,7 @@ jobs:
       contents: write   # 发布 Release 需要
     outputs:
       nginx_ver: ${{ steps.nginx.outputs.version }}
+      nginx_commit: ${{ steps.nginx.outputs.commit }}
       openssl_ver: ${{ steps.openssl.outputs.version }}
     container:
       image: alpine:latest   # musl libc，天然适合全静态编译
@@ -112,28 +113,20 @@ jobs:
           path: toolchain
           key: openssl-toolchain-${{ steps.openssl.outputs.version }}-v1
 
-      # ── 4. 解析 Nginx 版本号（固定取 GitHub master 分支）─────────
-      - name: Resolve Nginx version from master branch
+      # ── 4. 恢复 Nginx 源码缓存 ───────────────────────────────────
+      # master 分支天天在动：key 每轮唯一（run_id），restore-keys 前缀命中最近一次源码，
+      # 命中后只需 git fetch 增量更新；未命中才全量 clone。
+      # 版本号在第 5 步更新完源码后从本地源码读取，保证与编译产物一致
+      - name: Restore Nginx source cache
+        uses: actions/cache/restore@v4
+        with:
+          path: nginx-master
+          key: nginx-master-${{ github.run_id }}
+          restore-keys: nginx-master-
+
+      # ── 5. 下载 / 更新源码（版本号输出 id=nginx）─────────────────
+      - name: Download and update sources
         id: nginx
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "🔍 Reading nginx master branch version ..."
-
-          # master 分支没有版本号发布页，直接读源码里的版本宏
-          # src/core/nginx.h: #define NGINX_VERSION      "1.29.x"
-          NGINX_VER=$(curl -sfL "https://raw.githubusercontent.com/nginx/nginx/master/src/core/nginx.h" \
-            | grep -oE '#define NGINX_VERSION[[:space:]]+"[^"]+"' \
-            | grep -oE '[0-9]+(\.[0-9]+)+' || true)
-
-          [[ -z "$NGINX_VER" ]] && { echo "❌ Cannot resolve nginx version from master branch"; exit 1; }
-
-          echo "version=${NGINX_VER}" >> "$GITHUB_OUTPUT"
-          echo "✅ Nginx: ${NGINX_VER} (master)"
-
-      # ── 5. 下载源码 ───────────────────────────────────────────────
-      - name: Download sources
         shell: bash
         run: |
           set -euo pipefail
@@ -152,14 +145,15 @@ jobs:
             PRIMARY="https://github.com/openssl/openssl/releases/download/${GH_TAG}/openssl-${OPENSSL_VER}.tar.gz"
             FALLBACK="https://github.com/openssl/openssl/archive/refs/tags/${GH_TAG}.tar.gz"
 
-            if wget -q --spider "${PRIMARY}" 2>/dev/null; then
+            # curl -fL --retry：失败可见且自动重试（替代静默退出的 busybox wget -q）
+            if curl -fsIL --retry 3 "${PRIMARY}" >/dev/null 2>&1; then
               echo "📦 OpenSSL (release): ${PRIMARY}"
-              wget -q "${PRIMARY}"
+              curl -fL --retry 3 -o openssl.tar.gz "${PRIMARY}"
             else
               echo "📦 OpenSSL (tag archive): ${FALLBACK}"
-              wget -q "${FALLBACK}"
+              curl -fL --retry 3 -o openssl.tar.gz "${FALLBACK}"
             fi
-            tar xzf "openssl-${OPENSSL_VER}.tar.gz"
+            tar xzf openssl.tar.gz
             # tag 归档的顶层目录是 <repo>-<tag>，统一改回 openssl-<ver>
             if [[ ! -d "openssl-${OPENSSL_VER}" ]]; then
               mv "openssl-${GH_TAG}" "openssl-${OPENSSL_VER}"
@@ -168,40 +162,67 @@ jobs:
             echo "⏭️ Toolchain cache hit, skip OpenSSL source download"
           fi
 
-          # 源码固定取 GitHub 官方仓库 master 分支。
-          # 用 git clone 而非 archive 下载：codeload 归档接口对无认证请求有频率限制，
-          # busybox wget（镜像未装 GNU wget）失败时 -q 静默退出且无重试
-          echo "📦 Nginx: git clone --depth 1 https://github.com/nginx/nginx.git (master)"
-          git clone --depth 1 --branch master https://github.com/nginx/nginx.git nginx-master
+          # ── Nginx master 源码：缓存命中则增量更新，未命中才全量 clone ──
+          # （不用 codeload 归档下载：该接口对无认证请求有频率限制）
+          if [[ -d nginx-master/.git ]]; then
+            echo "⏭️ Nginx source cache hit, updating to latest master ..."
+            git -C nginx-master fetch --depth 1 origin master
+            git -C nginx-master reset --hard FETCH_HEAD
+            git -C nginx-master clean -fdx   # 清掉上轮构建残留（objs/Makefile/configure 等）
+          else
+            echo "📦 Nginx: git clone --depth 1 https://github.com/nginx/nginx.git (master, cache miss)"
+            rm -rf nginx-master
+            git clone --depth 1 --branch master https://github.com/nginx/nginx.git nginx-master
+          fi
           # GitHub 仓库不含根目录 configure（官方 release tarball 独有）。
           # 已 diff 验证：auto/configure 与官方 tarball 根 configure 内容一致，直接复制补齐
           cp nginx-master/auto/configure nginx-master/configure
           chmod +x nginx-master/configure
+
+          # 版本号取自即将编译的本地源码，保证与产物一致
+          # src/core/nginx.h: #define NGINX_VERSION      "1.31.9"
+          NGINX_VER=$(grep -oE '#define NGINX_VERSION[[:space:]]+"[^"]+"' nginx-master/src/core/nginx.h \
+            | grep -oE '[0-9]+(\.[0-9]+)+' || true)
+          [[ -z "$NGINX_VER" ]] && { echo "❌ Cannot resolve nginx version from master source"; exit 1; }
+          echo "version=${NGINX_VER}" >> "$GITHUB_OUTPUT"
+          # 记录源码 commit，供 Release 描述标注开发快照来源
+          NGINX_COMMIT=$(git -C nginx-master rev-parse --short HEAD)
+          echo "commit=${NGINX_COMMIT}" >> "$GITHUB_OUTPUT"
+          echo "✅ Nginx: ${NGINX_VER} (master@${NGINX_COMMIT})"
 
           # PCRE2 源码（由 nginx --with-pcre 自行静态编译，不依赖系统包）
           PCRE2_TAG=$(curl -sf https://api.github.com/repos/PCRE2Project/pcre2/releases/latest \
             | grep -oE '"tag_name": *"pcre2-[0-9.]+"' | cut -d'"' -f4)
           [[ -z "$PCRE2_TAG" ]] && { echo "❌ Cannot resolve latest PCRE2 version"; exit 1; }
           echo "📦 PCRE2: ${PCRE2_TAG}"
-          wget -q "https://github.com/PCRE2Project/pcre2/releases/download/${PCRE2_TAG}/pcre2-${PCRE2_TAG#pcre2-}.tar.gz"
-          tar xzf "pcre2-${PCRE2_TAG#pcre2-}.tar.gz"
+          curl -fL --retry 3 -o pcre2.tar.gz \
+            "https://github.com/PCRE2Project/pcre2/releases/download/${PCRE2_TAG}/pcre2-${PCRE2_TAG#pcre2-}.tar.gz"
+          tar xzf pcre2.tar.gz
 
-          wget -q https://github.com/openresty/headers-more-nginx-module/archive/refs/heads/master.tar.gz \
-            -O headers-more-nginx-module.tar.gz
+          curl -fL --retry 3 -o headers-more-nginx-module.tar.gz \
+            https://github.com/openresty/headers-more-nginx-module/archive/refs/heads/master.tar.gz
           tar xzf headers-more-nginx-module.tar.gz
 
-          wget -q https://github.com/winshining/nginx-http-flv-module/archive/refs/heads/master.tar.gz \
-            -O nginx-http-flv-module.tar.gz
+          curl -fL --retry 3 -o nginx-http-flv-module.tar.gz \
+            https://github.com/winshining/nginx-http-flv-module/archive/refs/heads/master.tar.gz
           tar xzf nginx-http-flv-module.tar.gz
 
-          wget -q https://github.com/AirisX/nginx_cookie_flag_module/archive/refs/heads/master.tar.gz \
-            -O nginx_cookie_flag_module.tar.gz
+          curl -fL --retry 3 -o nginx_cookie_flag_module.tar.gz \
+            https://github.com/AirisX/nginx_cookie_flag_module/archive/refs/heads/master.tar.gz
           tar xzf nginx_cookie_flag_module.tar.gz
 
           # ngx_brotli 依赖 deps/brotli 子模块，GitHub archive 不含子模块，必须 git clone
           git clone --recursive --depth 1 \
             https://github.com/google/ngx_brotli.git ngx_brotli
 
+      # ── 5b. 保存 Nginx 源码缓存 ──────────────────────────────────
+      # 放在编译前保存：缓存里是干净源码，不含 objs/ 等构建残留；
+      # key 用 run_id 每轮唯一，旧条目由 GitHub 缓存按 LRU 自动淘汰
+      - name: Save Nginx source cache
+        uses: actions/cache/save@v4
+        with:
+          path: nginx-master
+          key: nginx-master-${{ github.run_id }}
 
       # ── 6. OpenSSL 工具链：命中缓存直接用，未命中才编译 ──────────
       # 工具链 = install_sw(bin/include/静态.a) + install_ssldirs(ssl/openssl.cnf)。
@@ -361,7 +382,9 @@ jobs:
         run: |
           set -euo pipefail
           TAG="latest"
-          NOTES="nginx-${{ steps.nginx.outputs.version }} + openssl-${{ steps.openssl.outputs.version }} 全静态编译"
+          # nginx 版本宏是 master 上的开发中版本号，描述以 master@commit 标识来源，
+          # 不以官方发布版口吻呈现
+          NOTES="nginx-master@${{ steps.nginx.outputs.commit }} + openssl-${{ steps.openssl.outputs.version }} 全静态编译"
 
           if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             # 删掉旧资产，保证 release 下只有最新的一对文件
@@ -393,12 +416,13 @@ jobs:
           TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
           RESULT: ${{ needs.build.result }}
           NGINX_VER: ${{ needs.build.outputs.nginx_ver }}
+          NGINX_COMMIT: ${{ needs.build.outputs.nginx_commit }}
           OPENSSL_VER: ${{ needs.build.outputs.openssl_ver }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TRIGGER: ${{ github.event_name == 'schedule' && '⏰ 定时' || github.event_name == 'workflow_dispatch' && '🔧 手动' || github.event_name }}
         run: |
           if [[ "$RESULT" == "success" ]]; then ICON="✅"; else ICON="❌"; fi
-          TEXT="${ICON} [nginx-build] ${RESULT} (${TRIGGER}) | nginx: ${NGINX_VER:-?} / openssl: ${OPENSSL_VER:-?}
+          TEXT="${ICON} [nginx-build] ${RESULT} (${TRIGGER}) | nginx: master@${NGINX_COMMIT:-?} (${NGINX_VER:-?}) / openssl: ${OPENSSL_VER:-?}
           ${RUN_URL}"
           curl -sS --fail -o /dev/null -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
             -d chat_id="${TG_CHAT}" \
