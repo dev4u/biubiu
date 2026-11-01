@@ -2,9 +2,9 @@
 name: Build Static Nginx
 
 # ── 默认版本前缀（schedule 触发时 inputs 为空，回退到这里；改版本只动这一处）──
+# nginx 源码固定取 GitHub master 分支，版本号从源码宏读取，无需默认前缀
 env:
   OPENSSL_MAJOR_DEFAULT: '4'
-  NGINX_MAJOR_DEFAULT: '1'
 
 on:
   schedule:
@@ -13,10 +13,6 @@ on:
     inputs:
       openssl_major:
         description: 'OpenSSL 版本前缀 (如: 3.4 / 3.3 / 3.2 / 1.1.1)，留空使用默认值'
-        required: false
-        default: ''
-      nginx_major:
-        description: 'Nginx 版本前缀 (如: 1.31 / 1.28 / 1.26)，留空使用默认值'
         required: false
         default: ''
 
@@ -116,28 +112,25 @@ jobs:
           path: toolchain
           key: openssl-toolchain-${{ steps.openssl.outputs.version }}-v1
 
-      # ── 4. 解析 Nginx 最新小版本号 ───────────────────────────────
-      - name: Resolve latest Nginx version
+      # ── 4. 解析 Nginx 版本号（固定取 GitHub master 分支）─────────
+      - name: Resolve Nginx version from master branch
         id: nginx
         shell: bash
         run: |
           set -euo pipefail
-          PREFIX="${{ inputs.nginx_major || env.NGINX_MAJOR_DEFAULT }}"   # schedule 触发时 inputs 为空，回退默认值
-          ESCAPED="${PREFIX//./\\.}"
 
-          echo "🔍 Searching Nginx ${PREFIX}.x ..."
+          echo "🔍 Reading nginx master branch version ..."
 
-          # (\.[0-9]+)+ 至少吃一段完整的小版本号：前缀为 1 也能解析出 nginx-1.29.x，
-          # 否则会在第二个点处截断成 1.29，导致下一步下载 404
-          LATEST=$(curl -sfL "https://nginx.org/en/download.html" \
-            | grep -oE "nginx-${ESCAPED}(\.[0-9]+)+" \
-            | sort -V | tail -1 || true)
+          # master 分支没有版本号发布页，直接读源码里的版本宏
+          # src/core/nginx.h: #define NGINX_VERSION      "1.29.x"
+          NGINX_VER=$(curl -sfL "https://raw.githubusercontent.com/nginx/nginx/master/src/core/nginx.h" \
+            | grep -oE '#define NGINX_VERSION[[:space:]]+"[^"]+"' \
+            | grep -oE '[0-9]+(\.[0-9]+)+' || true)
 
-          [[ -z "$LATEST" ]] && { echo "❌ No Nginx found for prefix: ${PREFIX}"; exit 1; }
+          [[ -z "$NGINX_VER" ]] && { echo "❌ Cannot resolve nginx version from master branch"; exit 1; }
 
-          VER="${LATEST#nginx-}"
-          echo "version=${VER}" >> "$GITHUB_OUTPUT"
-          echo "✅ Nginx: ${VER}"
+          echo "version=${NGINX_VER}" >> "$GITHUB_OUTPUT"
+          echo "✅ Nginx: ${NGINX_VER} (master)"
 
       # ── 5. 下载源码 ───────────────────────────────────────────────
       - name: Download sources
@@ -145,7 +138,6 @@ jobs:
         run: |
           set -euo pipefail
           OPENSSL_VER="${{ steps.openssl.outputs.version }}"
-          NGINX_VER="${{ steps.nginx.outputs.version }}"
 
           # OpenSSL 源码仅在缓存未命中（需要自建工具链）时才下载
           if [[ "${{ steps.openssl-cache.outputs.cache-hit }}" != "true" ]]; then
@@ -176,9 +168,10 @@ jobs:
             echo "⏭️ Toolchain cache hit, skip OpenSSL source download"
           fi
 
-          echo "📦 Nginx: https://nginx.org/download/nginx-${NGINX_VER}.tar.gz"
-          wget -q "https://nginx.org/download/nginx-${NGINX_VER}.tar.gz"
-          tar xzf "nginx-${NGINX_VER}.tar.gz"
+          # 源码固定取 GitHub 官方仓库 master 分支；archive 顶层目录为 nginx-master
+          echo "📦 Nginx: https://github.com/nginx/nginx/archive/refs/heads/master.tar.gz"
+          wget -q https://github.com/nginx/nginx/archive/refs/heads/master.tar.gz -O nginx-master.tar.gz
+          tar xzf nginx-master.tar.gz
 
           # PCRE2 源码（由 nginx --with-pcre 自行静态编译，不依赖系统包）
           PCRE2_TAG=$(curl -sf https://api.github.com/repos/PCRE2Project/pcre2/releases/latest \
@@ -271,7 +264,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          NGINX_VER="${{ steps.nginx.outputs.version }}"
 
           PCRE2_DIR=$(ls -d pcre2-* | head -1)
           [[ -z "$PCRE2_DIR" ]] && { echo "❌ PCRE2 source directory not found"; exit 1; }
@@ -284,7 +276,7 @@ jobs:
             && cmake --build . --config Release \
                  --target brotlienc brotlicommon brotlidec -j"$(nproc)" )
 
-          cd "nginx-${NGINX_VER}"
+          cd nginx-master
 
           # OpenSSL：-I/-L 链接上一步装入 /usr/local 的工具链静态库
           # （gcc 默认搜索路径本就含 /usr/local，显式 -I/-L 只是加固）
@@ -348,8 +340,8 @@ jobs:
           NGINX_VER="${{ steps.nginx.outputs.version }}"
           ARCHIVE="nginx-${NGINX_VER}_openssl-${OPENSSL_VER}_linux-amd64-static.tar.gz"
 
-          strip "nginx-${NGINX_VER}/objs/nginx"
-          tar czf "${ARCHIVE}" -C "nginx-${NGINX_VER}/objs" nginx
+          strip "nginx-master/objs/nginx"
+          tar czf "${ARCHIVE}" -C "nginx-master/objs" nginx
 
           echo "📦 Output: ${ARCHIVE} ($(ls -lh "${ARCHIVE}" | awk '{print $5}'))"
           echo "archive_name=${ARCHIVE}" >> "$GITHUB_ENV"
