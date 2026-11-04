@@ -172,9 +172,10 @@ jobs:
           FP=$({
               printf '%s\n' "${CONFIG_OPTS[@]}"
               gcc --version | head -1
-              cat Configure
+              cat Configure VERSION.dat
               find Configurations -type f -exec cat {} +
               find . -name build.info -exec cat {} +
+              find . -name '*.h.in' -exec cat {} +
             } | sha256sum | awk '{print $1}')
           if [[ -f .workflow-config-fp && -f Makefile && "$(cat .workflow-config-fp)" == "$FP" ]]; then
             echo "⏭️ Configure options unchanged, skipping (incremental build)"
@@ -184,10 +185,18 @@ jobs:
             echo "$FP" > .workflow-config-fp
           fi
 
+          # 失败分级兜底：openssl 检测到 configdata.pm 过期时会自动重跑 Configure
+          # 并报错要求"再跑一次 make"，此时直接重试即可保住增量产物；
+          # 重试仍失败才 make clean 全量重编
           if ! make -j"$(nproc)" build_sw; then
-            echo "⚠️ incremental build failed, falling back to full rebuild ..."
-            make clean
-            make -j"$(nproc)" build_sw
+            echo "⚠️ make requested a re-run (configdata.pm refreshed), retrying ..."
+            if ! make -j"$(nproc)" build_sw; then
+              echo "⚠️ retry failed, falling back to full rebuild ..."
+              make clean || true
+              ./config "${CONFIG_OPTS[@]}"
+              echo "$FP" > .workflow-config-fp
+              make -j"$(nproc)" build_sw
+            fi
           fi
           make install_sw install_ssldirs DESTDIR="$TOOLCHAIN_DIR"
 
