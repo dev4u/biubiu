@@ -9,6 +9,8 @@ name: Build Static Nginx
 #   - pcre2-v1-*：PCRE2 源码 + 编译产物，key 精确到版本、不用 restore-keys
 #     （绝不能让旧版本的库冒充新版本），版本不变永远命中
 #   - 改编译选项时把对应 key/restore-keys 里的 v1 升成 v2，全员失效重建
+#   - configure/Configure 用指纹（选项+构建系统+编译器）判断是否需要重跑：
+#     盲目重跑会刷新生成头文件的 mtime，导致每轮全量重编、增量失效
 #   - 每轮成功后主动删除被取代的旧缓存（Prune 步骤），配额占用恒定，
 #     不再依赖 GitHub 的 LRU 被动淘汰
 
@@ -157,11 +159,30 @@ jobs:
           echo "✅ OpenSSL: ${OPENSSL_VER} (${REF}@${OSSL_COMMIT})"
 
           cd openssl-build
-          # 每轮重跑 Configure（几秒）：保证 configdata 与 workflow 选项一致，改动按需重编
+          # Configure 选项（注释不能插进续行，统一写这里）：
           # no-shared: 只出静态库    no-async: musl 静态编译必需
           # no-module: provider 编进 libcrypto（全静态 CLI 无法 dlopen 外部 .so）
           # -static:   Configure 认识该选项并透传给编译/链接器，CLI 全静态
-          ./config --prefix=/usr/local no-shared no-async no-module -static
+          CONFIG_OPTS=(--prefix=/usr/local no-shared no-async no-module -static)
+
+          # 指纹 = Configure 选项 + 构建系统定义（Configure/Configurations/build.info）+ 编译器版本。
+          # 指纹一致就跳过 Configure：重跑会刷新 opensslconf.h 等生成头文件的 mtime，
+          # 所有依赖它的 .o 全部重编，增量编译直接失效。上游改构建系统/换编译器时
+          # 指纹变化，自动恢复重跑，不会编出过期产物。
+          FP=$({
+              printf '%s\n' "${CONFIG_OPTS[@]}"
+              gcc --version | head -1
+              cat Configure
+              find Configurations -type f -exec cat {} +
+              find . -name build.info -exec cat {} +
+            } | sha256sum | awk '{print $1}')
+          if [[ -f .workflow-config-fp && -f Makefile && "$(cat .workflow-config-fp)" == "$FP" ]]; then
+            echo "⏭️ Configure options unchanged, skipping (incremental build)"
+          else
+            echo "🔧 Running Configure (options/build-system changed or first build)"
+            ./config "${CONFIG_OPTS[@]}"
+            echo "$FP" > .workflow-config-fp
+          fi
 
           if ! make -j"$(nproc)" build_sw; then
             echo "⚠️ incremental build failed, falling back to full rebuild ..."
@@ -337,12 +358,36 @@ jobs:
             '--with-ld-opt=-static -L/usr/local/lib64 -lpthread -ldl -lstdc++ -lm'
           )
 
-          ./configure "${CONFIGURE_ARGS[@]}"
+          # 指纹 = configure 参数 + auto/ 构建系统 + 模块 config/源码清单 + 编译器版本。
+          # 指纹一致就跳过 configure：重跑会刷新 objs/ngx_auto_config.h 的 mtime，
+          # 所有 .o 都依赖它，等于每轮全量重编。模块加了新源文件时清单变化，
+          # 指纹失效自动重跑，不会漏编新文件。
+          FP=$({
+              printf '%s\n' "${CONFIGURE_ARGS[@]}"
+              gcc --version | head -1
+              cat configure
+              find auto -type f -exec cat {} +
+              for M in ../headers-more-nginx-module-master ../nginx_cookie_flag_module-master \
+                       ../nginx-http-flv-module-master ../ngx_brotli; do
+                find "$M" -name config -exec cat {} +
+                find "$M" \( -name '*.c' -o -name '*.h' \) -exec echo {} +
+              done
+            } | sha256sum | awk '{print $1}')
+          run_configure() {
+            ./configure "${CONFIGURE_ARGS[@]}"
+            echo "$FP" > objs/.workflow-config-fp
+          }
+          if [[ -f objs/.workflow-config-fp && -f objs/Makefile && "$(cat objs/.workflow-config-fp)" == "$FP" ]]; then
+            echo "⏭️ configure options unchanged, skipping (incremental build)"
+          else
+            echo "🔧 Running configure (options/sources changed or first build)"
+            run_configure
+          fi
 
           if ! make -j"$(nproc)"; then
             echo "⚠️ incremental build failed, falling back to full rebuild ..."
             rm -rf objs
-            ./configure "${CONFIGURE_ARGS[@]}"
+            run_configure
             make -j"$(nproc)"
           fi
 
