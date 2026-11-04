@@ -392,7 +392,7 @@ jobs:
           TAG="latest"
           # master 源码的版本宏是开发中版本号，描述以 <ref>@commit 标识来源，
           # 不以官方发布版口吻呈现
-          NOTES="nginx ${NGINX_VER} (master@${{ steps.nginx.outputs.commit }}) + openssl ${{ steps.openssl.outputs.ref }}@${{ steps.openssl.outputs.commit }} (${OPENSSL_VER}) 全静态编译"
+          NOTES="nginx ${{ steps.nginx.outputs.version }} (master@${{ steps.nginx.outputs.commit }}) + openssl ${{ steps.openssl.outputs.ref }}@${{ steps.openssl.outputs.commit }} (${{ steps.openssl.outputs.version }}) 全静态编译"
 
           if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             # 删掉旧资产，保证 release 下只有最新的一对文件
