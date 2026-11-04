@@ -40,7 +40,8 @@ jobs:
     steps:
       # ── 1. 安装编译依赖 ──────────────────────────────────────────
       - name: Install build dependencies
-        shell: bash
+        # 注意：这步不能指定 shell: bash——它就是装 bash 的步骤，此时容器里还没有；
+        # 纯 apk add 命令在 busybox sh 下也能跑
         run: |
           apk add --no-cache \
              linux-headers \
