@@ -132,20 +132,26 @@ jobs:
             if git -C openssl-build fetch --depth 1 origin "${REF}" \
                && git -C openssl-build reset --hard FETCH_HEAD; then
               # reset --hard 会重写全部跟踪文件（日志 "Updating files: N/N"），
-              # mtime 全变新后 make 误判所有源码都变了 → 全量重编。
-              # 把内容未变的文件 mtime 回拨到参考文件（configdata.pm，昨天的
-              # Configure 时刻，必早于所有 .o）；真正变化的保持新 mtime 正常重编。
+              # mtime 全变新后 openssl 的 configdata.pm 过期检测/依赖判断会误判
+              # → 全量重编。把内容未变的文件 mtime 回拨到固定旧时间戳（48h 前，
+              # 严格早于缓存中的 configdata.pm 和一切 .o），真正变化的保持新
+              # mtime 正常触发重编。注意：diff 为空时不能走 grep -f（busybox
+              # 对空 pattern 文件行为不可靠），须单独处理。
               TMP_DIR=$(mktemp -d)
               git -C openssl-build diff --name-only "$BEFORE" HEAD | sort > "$TMP_DIR/changed"
-              if [[ -f openssl-build/configdata.pm ]]; then
-                (
-                  cd openssl-build
+              T=$(( $(date +%s) - 172800 ))
+              (
+                cd openssl-build
+                if [[ -s "$TMP_DIR/changed" ]]; then
                   git ls-files | grep -vxF -f "$TMP_DIR/changed" > "$TMP_DIR/rewind" || true
-                  if [[ -s "$TMP_DIR/rewind" ]]; then
-                    xargs touch -r configdata.pm < "$TMP_DIR/rewind"
-                  fi
-                )
-              fi
+                else
+                  git ls-files > "$TMP_DIR/rewind"
+                fi
+                if [[ -s "$TMP_DIR/rewind" ]]; then
+                  xargs touch -d "@$T" < "$TMP_DIR/rewind"
+                fi
+              )
+              echo "⏪ [诊断] rewound $(wc -l < "$TMP_DIR/rewind" 2>/dev/null || echo 0) tracked files to epoch ${T} (changed today: $(wc -l < "$TMP_DIR/changed"))"
               rm -rf "$TMP_DIR"
               echo "✅ OpenSSL source updated to ${REF}"
             else
@@ -211,6 +217,17 @@ jobs:
           done
           rm -rf "$BAK_DIR"
 
+          # [诊断] 时间戳链检查：期望 build.info/Configure < configdata.pm <
+          # 生成头文件 < .o。任何一处顺序颠倒都对应一类全量重编。
+          echo "=== [诊断] mtime chain（从上到下应递增）==="
+          for f in crypto/build.info Configure configdata.pm \
+                   include/openssl/configuration.h include/openssl/asn1.h; do
+            [[ -f "$f" ]] && stat -c '%y  %n' "$f"
+          done
+          FIRST_O=$(find apps crypto ssl providers -name '*.o' -type f 2>/dev/null | head -1)
+          [[ -n "$FIRST_O" ]] && stat -c '%y  %n' "$FIRST_O"
+          echo "build.info newer than configdata.pm: $(find . -name build.info -newer configdata.pm | wc -l)（>0 会触发强制重配）"
+
           # 失败分级兜底：openssl 检测到 configdata.pm 过期时会自动重跑 Configure
           # 并报错要求"再跑一次 make"，此时直接重试即可保住增量产物；
           # 重试仍失败才 make clean 全量重编
@@ -223,6 +240,7 @@ jobs:
               make -j"$(nproc)" build_sw
             fi
           fi
+          echo "=== [诊断] recompiled .o: $(find . -name '*.o' -newer configdata.pm | wc -l)/$(find . -name '*.o' | wc -l)（newer than configdata.pm，越小说明增量越有效）"
           make install_sw install_ssldirs DESTDIR="$TOOLCHAIN_DIR"
 
           OPENSSL_BIN="$TOOLCHAIN_DIR/usr/local/bin/openssl"
@@ -271,19 +289,23 @@ jobs:
             if git -C nginx-master fetch --depth 1 origin master \
                && git -C nginx-master reset --hard FETCH_HEAD; then
               # 同 OpenSSL 步骤：reset --hard 重写全部跟踪文件的 mtime，
-              # 回拨未变化文件（参考 objs/Makefile = 昨天 configure 时刻）
-              if [[ -f nginx-master/objs/Makefile ]]; then
-                TMP_DIR=$(mktemp -d)
-                git -C nginx-master diff --name-only "$BEFORE" HEAD | sort > "$TMP_DIR/changed"
-                (
-                  cd nginx-master
+              # 回拨未变化文件到 48h 前的固定时间戳（严格早于所有 .o）
+              TMP_DIR=$(mktemp -d)
+              git -C nginx-master diff --name-only "$BEFORE" HEAD | sort > "$TMP_DIR/changed"
+              T=$(( $(date +%s) - 172800 ))
+              (
+                cd nginx-master
+                if [[ -s "$TMP_DIR/changed" ]]; then
                   git ls-files | grep -vxF -f "$TMP_DIR/changed" > "$TMP_DIR/rewind" || true
-                  if [[ -s "$TMP_DIR/rewind" ]]; then
-                    xargs touch -r objs/Makefile < "$TMP_DIR/rewind"
-                  fi
-                )
-                rm -rf "$TMP_DIR"
-              fi
+                else
+                  git ls-files > "$TMP_DIR/rewind"
+                fi
+                if [[ -s "$TMP_DIR/rewind" ]]; then
+                  xargs touch -d "@$T" < "$TMP_DIR/rewind"
+                fi
+              )
+              echo "⏪ [诊断] rewound $(wc -l < "$TMP_DIR/rewind" 2>/dev/null || echo 0) tracked files to epoch ${T} (changed today: $(wc -l < "$TMP_DIR/changed"))"
+              rm -rf "$TMP_DIR"
               echo "✅ Nginx source updated"
             else
               echo "⚠️ fetch/reset failed, re-cloning ..."
@@ -438,6 +460,7 @@ jobs:
           fi
 
           echo ""
+          echo "=== [诊断] recompiled .o: $(find objs -name '*.o' -newer objs/ngx_auto_config.h 2>/dev/null | wc -l)/$(find objs -name '*.o' 2>/dev/null | wc -l)（newer than ngx_auto_config.h）"
           echo "=== Binary verification ==="
           file objs/nginx
           ldd objs/nginx 2>&1 || echo "✅ Static binary confirmed (no dynamic deps)"
