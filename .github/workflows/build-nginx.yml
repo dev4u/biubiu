@@ -169,12 +169,14 @@ jobs:
           if [[ ! -f openssl-build/VERSION.dat ]]; then
             echo "❌ VERSION.dat not found: 仅支持 OpenSSL 3.0+，ref '${REF}' 可能是老版本线"; exit 1
           fi
-          MAJOR=$(grep -E '^MAJOR=' openssl-build/VERSION.dat | head -1 | cut -d= -f2)
-          MINOR=$(grep -E '^MINOR=' openssl-build/VERSION.dat | head -1 | cut -d= -f2)
-          PATCH=$(grep -E '^PATCH=' openssl-build/VERSION.dat | head -1 | cut -d= -f2)
+          # grep -m1 代替 | head -1：head 会提前关管道，pipefail 下 find/grep
+          # 可能被 SIGPIPE 杀死（exit 141），set -e 直接终止
+          MAJOR=$(grep -m1 -E '^MAJOR=' openssl-build/VERSION.dat | cut -d= -f2)
+          MINOR=$(grep -m1 -E '^MINOR=' openssl-build/VERSION.dat | cut -d= -f2)
+          PATCH=$(grep -m1 -E '^PATCH=' openssl-build/VERSION.dat | cut -d= -f2)
           # || true：发布 tag 的 VERSION.dat 里 PRE_RELEASE_TAG 可能为空行/缺失，
           # grep 无匹配时 pipefail 会杀掉整条管道，不能让它误伤正常流程
-          PRE=$(grep -E '^PRE_RELEASE_TAG=' openssl-build/VERSION.dat | head -1 | cut -d= -f2 || true)
+          PRE=$(grep -m1 -E '^PRE_RELEASE_TAG=' openssl-build/VERSION.dat | cut -d= -f2 || true)
           [[ -z "$MAJOR" ]] && { echo "❌ Cannot parse VERSION.dat"; exit 1; }
           OPENSSL_VER="${MAJOR}.${MINOR}.${PATCH}"
           if [[ -n "$PRE" ]]; then OPENSSL_VER="${OPENSSL_VER}-${PRE}"; fi
@@ -224,7 +226,9 @@ jobs:
                    include/openssl/configuration.h include/openssl/asn1.h; do
             [[ -f "$f" ]] && stat -c '%y  %n' "$f"
           done
-          FIRST_O=$(find apps crypto ssl providers -name '*.o' -type f 2>/dev/null | head -1)
+          # sed -n '1p' 代替 | head -1：sed 会读完整个输入，避免 pipefail 下的
+          # SIGPIPE（exit 141）误杀（上一轮就是被这个诊断行自己绊倒的）
+          FIRST_O=$(find apps crypto ssl providers -name '*.o' -type f 2>/dev/null | sed -n '1p')
           [[ -n "$FIRST_O" ]] && stat -c '%y  %n' "$FIRST_O"
           echo "build.info newer than configdata.pm: $(find . -name build.info -newer configdata.pm | wc -l)（>0 会触发强制重配）"
 
