@@ -73,11 +73,30 @@ jobs:
       - name: Resolve latest PCRE2 version
         id: pcre2
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}   # 认证调 API：限额 60→1000 次/小时，避免匿名限流
         run: |
           set -euo pipefail
-          PCRE2_TAG=$(curl -sf --retry 3 https://api.github.com/repos/PCRE2Project/pcre2/releases/latest \
-            | grep -oE '"tag_name": *"pcre2-[0-9.]+"' | cut -d'"' -f4)
-          [[ -z "$PCRE2_TAG" ]] && { echo "❌ Cannot resolve latest PCRE2 version"; exit 1; }
+          # 不用 set -e 裸跑管道：curl 限流/网络抖动时 pipefail 会静默退出码 1，
+          # 连错误信息都来不及打。改为抓下响应体、带重试，失败时打印原文诊断
+          PCRE2_TAG=""
+          RAW=""
+          for ATTEMPT in 1 2 3; do
+            RAW=$(curl -sS --retry 3 --retry-delay 5 \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/PCRE2Project/pcre2/releases/latest" 2>&1 || true)
+            PCRE2_TAG=$(printf '%s\n' "$RAW" \
+              | grep -oE '"tag_name": *"pcre2-[0-9.]+"' | cut -d'"' -f4 | sed -n '1p' || true)
+            [[ -n "$PCRE2_TAG" ]] && break
+            echo "⚠️ attempt ${ATTEMPT}: no tag_name in response（可能被 GitHub API 限流），15s 后重试 ..."
+            sleep 15
+          done
+          if [[ -z "$PCRE2_TAG" ]]; then
+            echo "❌ Cannot resolve latest PCRE2 version. API response:"
+            printf '%s\n' "${RAW:0:800}"
+            exit 1
+          fi
           echo "version=${PCRE2_TAG#pcre2-}" >> "$GITHUB_OUTPUT"
           echo "✅ PCRE2: ${PCRE2_TAG}"
 
