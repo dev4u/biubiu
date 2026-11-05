@@ -9,9 +9,11 @@ name: Build Static Nginx
 #   - pcre2-v1-*：PCRE2 源码 + 编译产物，key 精确到版本、不用 restore-keys
 #     （绝不能让旧版本的库冒充新版本），版本不变永远命中
 #   - 改编译选项时把对应 key/restore-keys 里的 v1 升成 v2，全员失效重建
-#   - 每轮都重跑 configure/Configure 以与最新源码保持一致，但生成头文件
-#     （ngx_auto_config.h / configuration.h 等）内容没变时恢复旧 mtime，
-#     否则 make 会因时间戳变化而全量重编、增量失效
+#   - 每轮都重跑 configure/Configure 以与最新源码保持一致，但生成文件
+#     （ngx_auto_config.h / configuration.h / configdata.pm 等）内容没变时
+#     恢复旧 mtime，否则 make 会因时间戳变化而全量重编、增量失效
+#   - git reset --hard 会重写全部跟踪文件的 mtime，更新源码后把内容未变的
+#     文件回拨到旧时间戳，make 只重编真正变化的文件
 #   - 每轮成功后主动删除被取代的旧缓存（Prune 步骤），配额占用恒定，
 #     不再依赖 GitHub 的 LRU 被动淘汰
 
@@ -126,8 +128,25 @@ jobs:
           echo "🔍 OpenSSL ref: ${REF}"
           if [[ -d openssl-build/.git ]]; then
             echo "⏭️ OpenSSL build tree restored from cache, updating ..."
+            BEFORE=$(git -C openssl-build rev-parse HEAD)
             if git -C openssl-build fetch --depth 1 origin "${REF}" \
                && git -C openssl-build reset --hard FETCH_HEAD; then
+              # reset --hard 会重写全部跟踪文件（日志 "Updating files: N/N"），
+              # mtime 全变新后 make 误判所有源码都变了 → 全量重编。
+              # 把内容未变的文件 mtime 回拨到参考文件（configdata.pm，昨天的
+              # Configure 时刻，必早于所有 .o）；真正变化的保持新 mtime 正常重编。
+              TMP_DIR=$(mktemp -d)
+              git -C openssl-build diff --name-only "$BEFORE" HEAD | sort > "$TMP_DIR/changed"
+              if [[ -f openssl-build/configdata.pm ]]; then
+                (
+                  cd openssl-build
+                  git ls-files | grep -vxF -f "$TMP_DIR/changed" > "$TMP_DIR/rewind" || true
+                  if [[ -s "$TMP_DIR/rewind" ]]; then
+                    xargs touch -r configdata.pm < "$TMP_DIR/rewind"
+                  fi
+                )
+              fi
+              rm -rf "$TMP_DIR"
               echo "✅ OpenSSL source updated to ${REF}"
             else
               echo "⚠️ fetch/reset failed (ref switched?), re-cloning ..."
@@ -171,17 +190,20 @@ jobs:
           # 但 Configure 每次都会重写生成头文件、mtime 变新、所有依赖它的 .o 重编
           # ——所以先备份旧头文件，Configure 后内容没变的用 touch -r 恢复旧 mtime，
           # make 只重编真正变化的文件；内容真变了保留新 mtime，正常触发重编。
-          GEN_HDRS=(include/openssl/configuration.h include/openssl/opensslconf.h
-                    apps/include/configuration.h apps/include/opensslconf.h)
+          GEN_FILES=(include/openssl/configuration.h include/openssl/opensslconf.h
+                     apps/include/configuration.h apps/include/opensslconf.h configdata.pm)
           BAK_DIR=$(mktemp -d)
-          for f in "${GEN_HDRS[@]}"; do
+          for f in "${GEN_FILES[@]}"; do
             [[ -f "$f" ]] && cp -p "$f" "$BAK_DIR/$(echo "$f" | tr '/' '_')"
           done
 
           ./config "${CONFIG_OPTS[@]}"
           rm -f .workflow-config-fp   # 清理旧方案的指纹标记
 
-          for f in "${GEN_HDRS[@]}"; do
+          # configdata.pm 是全部 make 期生成文件（公开头文件/err 头/.inc）的前置
+          # 依赖：它被重写后所有生成头文件都会重新生成，进而全量重编。
+          # 内容没变就恢复旧 mtime，保住 configdata.pm < 生成头文件 < .o 的顺序。
+          for f in "${GEN_FILES[@]}"; do
             B="$BAK_DIR/$(echo "$f" | tr '/' '_')"
             if [[ -f "$f" && -f "$B" ]] && cmp -s "$f" "$B"; then
               touch -r "$B" "$f"
@@ -245,8 +267,23 @@ jobs:
           # 缓存命中（含 objs/）→ 增量更新源码；不 clean，保留编译产物做增量编译
           if [[ -d nginx-master/.git ]]; then
             echo "⏭️ Nginx build tree restored from cache, updating to latest master ..."
+            BEFORE=$(git -C nginx-master rev-parse HEAD)
             if git -C nginx-master fetch --depth 1 origin master \
                && git -C nginx-master reset --hard FETCH_HEAD; then
+              # 同 OpenSSL 步骤：reset --hard 重写全部跟踪文件的 mtime，
+              # 回拨未变化文件（参考 objs/Makefile = 昨天 configure 时刻）
+              if [[ -f nginx-master/objs/Makefile ]]; then
+                TMP_DIR=$(mktemp -d)
+                git -C nginx-master diff --name-only "$BEFORE" HEAD | sort > "$TMP_DIR/changed"
+                (
+                  cd nginx-master
+                  git ls-files | grep -vxF -f "$TMP_DIR/changed" > "$TMP_DIR/rewind" || true
+                  if [[ -s "$TMP_DIR/rewind" ]]; then
+                    xargs touch -r objs/Makefile < "$TMP_DIR/rewind"
+                  fi
+                )
+                rm -rf "$TMP_DIR"
+              fi
               echo "✅ Nginx source updated"
             else
               echo "⚠️ fetch/reset failed, re-cloning ..."
